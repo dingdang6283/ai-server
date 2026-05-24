@@ -5019,6 +5019,8 @@ def get_frontend_config():
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve_frontend(path):
+    if path and (path.startswith('api/') or path.startswith('v1/')):
+        return json_response({"error": "接口不存在"}, 404)
     if path and os.path.exists(os.path.join(FRONTEND_DIST, path)):
         return send_from_directory(FRONTEND_DIST, path)
     index_path = os.path.join(FRONTEND_DIST, 'index.html')
