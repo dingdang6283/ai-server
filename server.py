@@ -3289,7 +3289,7 @@ def claim_token_page(token):
           display: flex;
           align-items: center;
           justify-content: center;
-          padding: 20px;
+          padding: 16px;
         }
         .card {
           background: #fff;
@@ -3299,6 +3299,18 @@ def claim_token_page(token):
           max-width: 440px;
           width: 100%;
           text-align: center;
+        }
+        @media (max-width: 480px) {
+          body { padding: 12px; }
+          .card { padding: 32px 20px; border-radius: 16px; }
+          h1 { font-size: 18px; }
+          .btn { padding: 12px 24px; font-size: 15px; width: 100%; }
+          #amountDisplay { font-size: 28px !important; }
+        }
+        @media (max-width: 360px) {
+          .card { padding: 24px 14px; }
+          h1 { font-size: 16px; }
+          .sub { font-size: 13px; }
         }
         .logo {
           width: 56px; height: 56px;
