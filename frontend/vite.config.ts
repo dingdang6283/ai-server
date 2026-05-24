@@ -1,16 +1,13 @@
-import { defineConfig, loadEnv } from 'vite'
+import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-import obfuscatorPlugin from 'vite-plugin-javascript-obfuscator'
 import sri from 'vite-plugin-sri4'
 
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
   const isProd = mode === 'production'
-
   return {
     define: {
-      __API_HOST__: JSON.stringify(env.API_HOST || 'localhost'),
-      __API_PROTOCOL__: JSON.stringify(env.API_PROTOCOL || 'http'),
+      __API_HOST__: JSON.stringify(''),
+      __API_PROTOCOL__: JSON.stringify(''),
     },
     plugins: [
       react(),

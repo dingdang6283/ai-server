@@ -5,8 +5,8 @@ import { useToast } from '../components/Toast'
 declare const __API_HOST__: string
 declare const __API_PROTOCOL__: string
 
-const API_HOST = __API_HOST__
-const API_PROTOCOL = __API_PROTOCOL__
+const API_HOST = (typeof window !== 'undefined' && (window as any).__APP_CONFIG__?.api_host) || __API_HOST__
+const API_PROTOCOL = (typeof window !== 'undefined' && (window as any).__APP_CONFIG__?.api_protocol) || __API_PROTOCOL__
 
 type Method = 'GET' | 'POST' | 'PUT'
 

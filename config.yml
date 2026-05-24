@@ -1,7 +1,7 @@
 
 
 app:
-  secret_key: ""
+  secret_key: "dingdang-cloud-secret-key-2026"
   host: "127.0.0.1"
   port: 8081
   # 代理协议版本: 0=不使用, 1=解析HTTP头部(X-Forwarded-For/X-Real-IP), 2=解析socket级Proxy Protocol v2
@@ -12,12 +12,18 @@ app:
 
 smtp:
   display_name: "aicloud"
-  sender_email: ""
-  username: ""
-  password: ""
-  server: ""
+  sender_email: "abc3797534@qq.com"
+  username: "abc3797534"
+  password: "qjaweeyzedjlccaa"
+  server: "smtp.qq.com"
   port: 465
   encryption: "SSL"
 
 api:
-  xfyun_password: ""
+  xfyun_password: "ecaf4f60aad5b1f52ff1900eaef9daca:YTJlYjhmZWZkNGU5NjFjZjVjY2RiNGZi"
+
+frontend:
+  api_host: "cloud.ai-dingdang.fucku.top"
+  api_protocol: "https"
+  site_title: "ai平台"
+  page_title: "DingDang Cloud"

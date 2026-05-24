@@ -909,7 +909,10 @@ def handle_http_error(error):
             code)
     index_path = os.path.join(FRONTEND_DIST, 'index.html')
     if os.path.exists(index_path):
-        return send_from_directory(FRONTEND_DIST, 'index.html'), code
+        with open(index_path, 'r', encoding='utf-8') as f:
+            html = f.read()
+        html = inject_frontend_config(html)
+        return Response(html, mimetype='text/html'), code
     return json_response(
         {"error": str(error.description) if hasattr(error, 'description') else str(error)},
         code)
@@ -3737,6 +3740,23 @@ class XunfeiBatchAdapter:
 API_PASSWORD = CFG['api']['xfyun_password']
 ADAPTER = XunfeiBatchAdapter(API_PASSWORD) if API_PASSWORD else None
 
+# frontend config
+FRONTEND_CONFIG = {
+    'api_host': CFG.get('frontend', {}).get('api_host', '127.0.0.1'),
+    'api_protocol': CFG.get('frontend', {}).get('api_protocol', 'http'),
+    'site_title': CFG.get('frontend', {}).get('site_title', 'ai平台'),
+    'page_title': CFG.get('frontend', {}).get('page_title', 'DingDang Cloud'),
+}
+
+
+def inject_frontend_config(html: str) -> str:
+    config_json = json.dumps(FRONTEND_CONFIG, ensure_ascii=False)
+    script = f'<script>window.__APP_CONFIG__={config_json}</script>'
+    html = html.replace('</head>', script + '</head>')
+    import re
+    html = re.sub(r'<title>[^<]*</title>', f'<title>{FRONTEND_CONFIG["page_title"]}</title>', html, count=1)
+    return html
+
 
 def extract_real_question(messages: list) -> str:
     user_question = ""
@@ -4447,6 +4467,11 @@ def health_check():
     })
 
 
+@app.route('/api/config', methods=['GET'])
+def get_frontend_config():
+    return json_response(FRONTEND_CONFIG)
+
+
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve_frontend(path):
@@ -4454,7 +4479,10 @@ def serve_frontend(path):
         return send_from_directory(FRONTEND_DIST, path)
     index_path = os.path.join(FRONTEND_DIST, 'index.html')
     if os.path.exists(index_path):
-        return send_from_directory(FRONTEND_DIST, 'index.html')
+        with open(index_path, 'r', encoding='utf-8') as f:
+            html = f.read()
+        html = inject_frontend_config(html)
+        return Response(html, mimetype='text/html')
     return json_response({
         "message": "DingDang Cloud - 千问API适配器管理平台",
         "status": "running",
