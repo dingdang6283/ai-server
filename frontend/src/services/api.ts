@@ -1,6 +1,6 @@
 import type {
-  User, LoginResponse, RegisterResponse, TokenConfig,
-  AdminUser, UsageStats, CalculateTokenResult, UsageHistory,
+  User, LoginResponse, RegisterResponse, TokenConfig, TokenStats,
+  AdminUser, AdminTask, UsageStats, CalculateTokenResult, UsageHistory,
   Space, ContextMessage, ContextSettings, Notification,
   IPBan, IPTracking, AuditLogEntry
 } from '../types/api'
@@ -163,6 +163,26 @@ export const adminApi = {
 
   getUsageStats: () =>
     request<UsageStats>('/api/admin/usage-stats'),
+
+  getTokenStats: () =>
+    request<TokenStats>('/api/admin/token-stats'),
+
+  getTasks: () =>
+    request<{ tasks: AdminTask[] }>('/api/admin/tasks'),
+
+  createTask: (data: { title: string; description?: string; priority?: number }) =>
+    request<{ task: AdminTask; message: string }>('/api/admin/tasks',
+      { method: 'POST', body: JSON.stringify(data) }),
+
+  updateTask: (taskId: number, data: Partial<AdminTask>) =>
+    request<{ task: AdminTask; message: string }>(`/api/admin/tasks/${taskId}`,
+      { method: 'PUT', body: JSON.stringify(data) }),
+
+  deleteTask: (taskId: number) =>
+    request<{ message: string }>(`/api/admin/tasks/${taskId}`, { method: 'DELETE' }),
+
+  cleanupTasks: () =>
+    request<{ message: string }>('/api/admin/tasks/cleanup', { method: 'POST' }),
 
   sendNotification: (data: {
     subject: string; body: string; type: string;

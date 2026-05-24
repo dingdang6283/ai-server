@@ -23,7 +23,13 @@ export default function Navbar() {
   return (
     <nav className="navbar">
       <div className="container">
-        <Link to="/" className="navbar-brand">DingDang Cloud</Link>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem' }}>
+          <Link to="/" className="navbar-brand">DingDang Cloud</Link>
+          <a href="https://github.com/dingdang6283/ai-server" target="_blank" rel="noopener noreferrer"
+            style={{ color: 'var(--gray-500)', fontSize: '0.6rem', textDecoration: 'none' }}>
+            github.com/dingdang6283/ai-server
+          </a>
+        </div>
         <div className="navbar-nav">
           <Link to="/" className={isActive('/')}>控制台</Link>
           <Link to="/playground" className={isActive('/playground')}>API调试</Link>

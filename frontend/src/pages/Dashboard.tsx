@@ -367,6 +367,7 @@ export default function Dashboard() {
       const answer = res?.choices?.[0]?.message?.content || ''
       const usage = res?.usage || {}
       const ctxCount = usage['context_messages'] ?? 0
+      const ctxTokens = usage['context_tokens'] ?? 0
       const formatted = [
         '━━━ AI 回答 ━━━',
         '',
@@ -376,6 +377,7 @@ export default function Dashboard() {
         '  使用Token: ' + (usage['use-token'] ?? 'N/A'),
         '  剩余Token: ' + (usage['token'] ?? 'N/A'),
         ctxCount > 0 ? '  历史上下文: ' + ctxCount + '条' : '',
+        ctxTokens > 0 ? '  load: ' + ctxTokens : '',
         res?.warning ? '⚠️ ' + res.warning : '',
       ].filter(Boolean).join('\n')
       setTestResponse(formatted)

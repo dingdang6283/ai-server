@@ -50,7 +50,31 @@ export interface AdminUser {
 export interface UsageStats {
   total_users: number
   verified_users: number
+  unverified_users: number
   active_users: number
+  total_upload_tokens: number
+  total_download_tokens: number
+  total_used_tokens: number
+}
+
+export interface TokenStats {
+  upload_tokens: number
+  download_tokens: number
+  total_tokens: number
+  user_count: number
+}
+
+export interface AdminTask {
+  id: number
+  title: string
+  description: string
+  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'canceled'
+  priority: number
+  created_by: number | null
+  assigned_to: number | null
+  created_at: string
+  updated_at: string
+  completed_at: string | null
 }
 
 export interface CalculateTokenResult {

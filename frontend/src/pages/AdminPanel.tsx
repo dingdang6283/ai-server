@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
 import { adminApi, aiApi } from '../services/api'
 import { useToast } from '../components/Toast'
-import type { AdminUser, TokenConfig, UsageStats, IPBan, IPTracking, AuditLogEntry } from '../types/api'
+import type { AdminUser, TokenConfig, UsageStats, IPBan, IPTracking, AuditLogEntry, AdminTask } from '../types/api'
 
-type AdminTab = 'users' | 'ip_monitor' | 'ip_bans' | 'audit_log' | 'batch'
+type AdminTab = 'users' | 'ip_monitor' | 'ip_bans' | 'audit_log' | 'batch' | 'tasks'
 
 const priorityLabels: Record<number, string> = {
   0: '最高', 1: '高', 2: '中', 3: '较低', 4: '低', 5: '最低'
@@ -14,7 +14,8 @@ const TAB_NAMES: Record<AdminTab, string> = {
   ip_monitor: 'IP监控',
   ip_bans: 'IP封禁',
   audit_log: '审计日志',
-  batch: '批处理管理'
+  batch: '批处理管理',
+  tasks: '任务管理'
 }
 
 export default function AdminPanel() {
@@ -57,6 +58,224 @@ export default function AdminPanel() {
       {activeTab === 'ip_bans' && <IpBansTab showToast={showToast} showConfirm={showConfirm} />}
       {activeTab === 'audit_log' && <AuditLogTab showToast={showToast} />}
       {activeTab === 'batch' && <BatchManagementTab showToast={showToast} />}
+      {activeTab === 'tasks' && <TasksManagementTab showToast={showToast} />}
+    </div>
+  )
+}
+
+function TasksManagementTab({ showToast }: { showToast: any }) {
+  const [tasks, setTasks] = useState<AdminTask[]>([])
+  const [loading, setLoading] = useState(true)
+  const [showForm, setShowForm] = useState(false)
+  const [title, setTitle] = useState('')
+  const [description, setDescription] = useState('')
+  const [priority, setPriority] = useState(2)
+  const [editId, setEditId] = useState<number | null>(null)
+
+  const loadData = async () => {
+    setLoading(true)
+    try {
+      const res = await adminApi.getTasks()
+      setTasks(res.tasks)
+    } catch (err: any) {
+      showToast(err.message || '加载失败', 'error')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { loadData() }, [])
+
+  const handleSubmit = async () => {
+    if (!title.trim()) return showToast('请输入任务标题', 'error')
+    try {
+      const data: any = { title: title.trim(), description: description.trim(), priority }
+      if (editId) {
+        await adminApi.updateTask(editId, data)
+        showToast('任务已更新', 'success')
+      } else {
+        await adminApi.createTask(data)
+        showToast('任务已创建', 'success')
+      }
+      setShowForm(false)
+      setEditId(null)
+      setTitle('')
+      setDescription('')
+      setPriority(2)
+      loadData()
+    } catch (err: any) {
+      showToast(err.message || '操作失败', 'error')
+    }
+  }
+
+  const handleEdit = (task: AdminTask) => {
+    setEditId(task.id)
+    setTitle(task.title)
+    setDescription(task.description)
+    setPriority(task.priority)
+    setShowForm(true)
+  }
+
+  const handleDelete = async (taskId: number) => {
+    try {
+      await adminApi.deleteTask(taskId)
+      showToast('任务已删除', 'success')
+      loadData()
+    } catch (err: any) {
+      showToast(err.message || '删除失败', 'error')
+    }
+  }
+
+  const handleStatusChange = async (task: AdminTask, status: string) => {
+    try {
+      await adminApi.updateTask(task.id, { status } as any)
+      showToast('状态已更新', 'success')
+      loadData()
+    } catch (err: any) {
+      showToast(err.message || '更新失败', 'error')
+    }
+  }
+
+  const handleCleanup = async () => {
+    try {
+      const res = await adminApi.cleanupTasks()
+      showToast(res.message, 'success')
+      loadData()
+    } catch (err: any) {
+      showToast(err.message || '清理失败', 'error')
+    }
+  }
+
+  const statusColor = (s: string) => ({
+    pending: '#f59e0b', in_progress: '#3b82f6',
+    completed: '#22c55e', failed: '#ef4444', canceled: '#6b7280'
+  }[s] || '#6b7280')
+
+  const priorityLabel = (p: number) =>
+    priorityLabels[p] || (p < 2 ? '高' : p > 3 ? '低' : '中')
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
+        <button className="btn btn-primary btn-sm" onClick={() => {
+          setEditId(null); setTitle(''); setDescription(''); setPriority(2); setShowForm(true)
+        }}>
+          新建任务
+        </button>
+        <button className="btn btn-secondary btn-sm" onClick={handleCleanup}>
+          清理过期
+        </button>
+        <button className="btn btn-secondary btn-sm" onClick={loadData} disabled={loading}>
+          {loading ? '刷新中...' : '刷新'}
+        </button>
+      </div>
+
+      {showForm && (
+        <div className="card" style={{ marginBottom: '1rem', padding: '1rem' }}>
+          <h4 style={{ marginBottom: '0.75rem' }}>{editId ? '编辑任务' : '新建任务'}</h4>
+          <div className="form-group">
+            <label className="form-label">标题</label>
+            <input className="input" value={title} onChange={e => setTitle(e.target.value)}
+              placeholder="任务标题" />
+          </div>
+          <div className="form-group">
+            <label className="form-label">描述</label>
+            <textarea className="input" value={description} onChange={e => setDescription(e.target.value)}
+              placeholder="任务描述（可选）" rows={3} style={{ resize: 'vertical' }} />
+          </div>
+          <div className="form-group">
+            <label className="form-label">优先级</label>
+            <select className="input" value={priority} onChange={e => setPriority(Number(e.target.value))}>
+              <option value={0}>最高</option>
+              <option value={1}>高</option>
+              <option value={2}>中</option>
+              <option value={3}>较低</option>
+              <option value={4}>低</option>
+            </select>
+          </div>
+          <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.75rem' }}>
+            <button className="btn btn-primary btn-sm" onClick={handleSubmit}>
+              {editId ? '保存' : '创建'}
+            </button>
+            <button className="btn btn-secondary btn-sm" onClick={() => {
+              setShowForm(false); setEditId(null); setTitle(''); setDescription('')
+            }}>
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--gray-400)' }}>
+          <span className="spinner" /> 加载中...
+        </div>
+      ) : tasks.length === 0 ? (
+        <div className="card" style={{ padding: '2rem', textAlign: 'center', color: 'var(--gray-500)' }}>
+          暂无任务
+        </div>
+      ) : (
+        <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
+          <table style={{ fontSize: '0.75rem', width: '100%', minWidth: 700 }}>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>标题</th>
+                <th>状态</th>
+                <th>优先级</th>
+                <th>创建时间</th>
+                <th>完成时间</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tasks.map(t => (
+                <tr key={t.id}>
+                  <td style={{ fontFamily: 'monospace' }}>{t.id}</td>
+                  <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }} title={t.description}>
+                    {t.title}
+                    {t.description ? <span style={{ color: 'var(--gray-500)', marginLeft: '0.25rem' }}>- {t.description}</span> : null}
+                  </td>
+                  <td>
+                    <span style={{ color: statusColor(t.status), fontWeight: 600 }}>{t.status}</span>
+                  </td>
+                  <td>{priorityLabel(t.priority)}</td>
+                  <td style={{ whiteSpace: 'nowrap' }}>{t.created_at?.replace('T', ' ').slice(0, 16)}</td>
+                  <td style={{ whiteSpace: 'nowrap', color: 'var(--gray-500)' }}>
+                    {t.completed_at ? t.completed_at.replace('T', ' ').slice(0, 16) : '-'}
+                  </td>
+                  <td>
+                    <div style={{ display: 'flex', gap: '0.25rem', alignItems: 'center' }}>
+                      {t.status === 'pending' && (
+                        <button className="btn btn-sm btn-primary" style={{ fontSize: '0.65rem', padding: '0.15rem 0.3rem' }}
+                          onClick={() => handleStatusChange(t, 'in_progress')}>
+                          开始
+                        </button>
+                      )}
+                      {t.status === 'in_progress' && (
+                        <button className="btn btn-sm btn-success" style={{ fontSize: '0.65rem', padding: '0.15rem 0.3rem' }}
+                          onClick={() => handleStatusChange(t, 'completed')}>
+                          完成
+                        </button>
+                      )}
+                      {t.status === 'pending' && (
+                        <button className="btn btn-sm btn-secondary" style={{ fontSize: '0.65rem', padding: '0.15rem 0.3rem' }}
+                          onClick={() => handleEdit(t)}>
+                          编辑
+                        </button>
+                      )}
+                      <button className="btn btn-sm btn-danger" style={{ fontSize: '0.65rem', padding: '0.15rem 0.3rem' }}
+                        onClick={() => handleDelete(t.id)}>
+                        删除
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }
@@ -271,7 +490,25 @@ function UserManagementTab({ showToast, showConfirm }: { showToast: any; showCon
           <div className="card stat-card stagger-item">
             <div className="stat-label">未验证</div>
             <div className="stat-value" style={{ color: 'var(--warning)' }}>
-              {(stats.total_users - 1) - stats.verified_users}
+              {Math.max(0, stats.total_users - stats.verified_users)}
+            </div>
+          </div>
+          <div className="card stat-card stagger-item">
+            <div className="stat-label">上传Token</div>
+            <div className="stat-value" style={{ color: '#f59e0b', fontSize: '1.1rem' }}>
+              {(stats.total_upload_tokens ?? 0).toLocaleString()}
+            </div>
+          </div>
+          <div className="card stat-card stagger-item">
+            <div className="stat-label">下载Token</div>
+            <div className="stat-value" style={{ color: '#8b5cf6', fontSize: '1.1rem' }}>
+              {(stats.total_download_tokens ?? 0).toLocaleString()}
+            </div>
+          </div>
+          <div className="card stat-card stagger-item">
+            <div className="stat-label">总Token消耗</div>
+            <div className="stat-value" style={{ color: '#ec4899', fontSize: '1.1rem' }}>
+              {(stats.total_used_tokens ?? 0).toLocaleString()}
             </div>
           </div>
         </div>
@@ -748,103 +985,51 @@ function BatchManagementTab({ showToast }: { showToast: any }) {
   const [batchDetailLoading, setBatchDetailLoading] = useState(false)
   const [batchResults, setBatchResults] = useState<any>(null)
   const [batchResultsLoading, setBatchResultsLoading] = useState(false)
-  const [sseConnected, setSseConnected] = useState(false)
-  const sseRef = useRef<EventSource | null>(null)
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const refreshTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const mountedRef = useRef(true)
 
   useEffect(() => {
-    if (activeSubTab === 'batches') {
-      loadBatches()
-    } else {
-      loadFiles()
-    }
-  }, [activeSubTab])
-
-  useEffect(() => {
-    const apiKey = localStorage.getItem('api_key')
-    if (!apiKey) return
-
-    let reconnectAttempt = 0
-
-    const connectSSE = () => {
-      if (sseRef.current) sseRef.current.close()
-      const evtSource = new EventSource(`/v1/batch/events?token=${apiKey}`)
-      sseRef.current = evtSource
-
-      evtSource.addEventListener('batches_updated', (e: MessageEvent) => {
-        try {
-          const data = JSON.parse(e.data)
-          setBatches(data?.data || [])
-        } catch {}
-      })
-
-      evtSource.addEventListener('files_updated', (e: MessageEvent) => {
-        try {
-          const data = JSON.parse(e.data)
-          setFiles(data?.data || [])
-        } catch {}
-      })
-
-      evtSource.onopen = () => {
-        setSseConnected(true)
-        reconnectAttempt = 0
-        if (pollRef.current) {
-          clearInterval(pollRef.current)
-          pollRef.current = null
-        }
-      }
-
-      evtSource.onerror = () => {
-        setSseConnected(false)
-        evtSource.close()
-        reconnectAttempt++
-        const delay = Math.min(1000 * reconnectAttempt, 10000)
-        reconnectTimerRef.current = setTimeout(connectSSE, delay)
-        if (!pollRef.current) {
-          pollRef.current = setInterval(() => {
-            if (activeSubTab === 'batches') loadBatches()
-            else loadFiles()
-          }, 5000)
-        }
-      }
-    }
-
-    connectSSE()
-
-    return () => {
-      if (sseRef.current) sseRef.current.close()
-      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
-      if (pollRef.current) clearInterval(pollRef.current)
-      sseRef.current = null
-      pollRef.current = null
-      reconnectTimerRef.current = null
-    }
+    return () => { mountedRef.current = false }
   }, [])
 
+  const sortByTime = (list: any[]) =>
+    list.slice().sort((a: any, b: any) =>
+      ('' + (b.created_at || '')).localeCompare('' + (a.created_at || '')))
+
   const loadBatches = async () => {
-    setLoading(true)
     try {
       const res = await aiApi.listBatches()
-      setBatches(res?.data || [])
+      console.log('[DEBUG] listBatches response:', res)
+      console.log('[DEBUG] res.data:', res?.data)
+      console.log('[DEBUG] res.data length:', res?.data?.length)
+      if (mountedRef.current) setBatches(sortByTime(res?.data || []))
     } catch (err: any) {
-      showToast(err.message || '加载失败', 'error')
-    } finally {
-      setLoading(false)
+      console.error('[DEBUG] loadBatches error:', err)
+      showToast(err.message || '加载批处理失败', 'error')
     }
   }
 
   const loadFiles = async () => {
-    setLoading(true)
     try {
       const res = await aiApi.listFiles()
-      setFiles(res?.data || [])
+      if (mountedRef.current) setFiles(sortByTime(res?.data || []))
     } catch (err: any) {
-      showToast(err.message || '加载失败', 'error')
-    } finally {
-      setLoading(false)
+      showToast(err.message || '加载文件失败', 'error')
     }
   }
+
+  const refreshAll = () => {
+    loadBatches()
+    loadFiles()
+  }
+
+  useEffect(() => {
+    refreshAll()
+    refreshTimerRef.current = setInterval(refreshAll, 3000)
+    return () => {
+      if (refreshTimerRef.current) clearInterval(refreshTimerRef.current)
+    }
+  }, [])
 
   const handleQueryBatch = async () => {
     if (!selectedBatchId.trim()) return
@@ -864,7 +1049,7 @@ function BatchManagementTab({ showToast }: { showToast: any }) {
     try {
       const res = await aiApi.cancelBatch(batchId)
       showToast(res?.status || '已取消', 'success')
-      loadBatches()
+      refreshAll()
     } catch (err: any) {
       showToast(err.message || '取消失败', 'error')
     }
@@ -874,7 +1059,7 @@ function BatchManagementTab({ showToast }: { showToast: any }) {
     try {
       const res = await aiApi.deleteFile(fileId)
       showToast(res?.deleted ? '已删除' : '删除失败', res?.deleted ? 'success' : 'error')
-      loadFiles()
+      refreshAll()
     } catch (err: any) {
       showToast(err.message || '删除失败', 'error')
     }
@@ -993,11 +1178,10 @@ function BatchManagementTab({ showToast }: { showToast: any }) {
         </button>
         <span style={{
           fontSize: '0.6rem', padding: '0.1rem 0.3rem', borderRadius: 3,
-          color: sseConnected ? '#22c55e' : '#6b7280',
-          border: `1px solid ${sseConnected ? '#22c55e' : '#6b7280'}`,
+          color: '#22c55e', border: '1px solid #22c55e',
           marginLeft: 'auto'
         }}>
-          {sseConnected ? '实时' : '轮询'}
+          自动刷新
         </span>
       </div>
 

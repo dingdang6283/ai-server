@@ -401,6 +401,28 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(id)
         );
     ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS admin_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            status TEXT DEFAULT 'pending' CHECK(status IN ('pending','in_progress','completed','failed','canceled')),
+            priority INTEGER DEFAULT 2,
+            created_by INTEGER,
+            assigned_to INTEGER,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            completed_at TEXT,
+            FOREIGN KEY (created_by) REFERENCES users(id),
+            FOREIGN KEY (assigned_to) REFERENCES users(id)
+        )
+    ''')
+    conn.execute('''
+        CREATE INDEX IF NOT EXISTS idx_admin_tasks_created
+        ON admin_tasks(created_at)
+    ''')
+    # 清理7天前的已完成/取消任务
+    conn.execute("DELETE FROM admin_tasks WHERE created_at < datetime('now', '-7 days') AND status IN ('completed','canceled')")
     conn.commit()
 
     for col in ['remaining_tokens', 'max_concurrent', 'priority',
@@ -3019,12 +3041,142 @@ def admin_usage_stats():
     active = conn.execute(
         "SELECT COUNT(*) as c FROM users WHERE is_active = 1"
     ).fetchone()['c']
+    upload = conn.execute(
+        "SELECT COALESCE(SUM(prompt_tokens), 0) as c FROM api_usage_log"
+    ).fetchone()['c']
+    download = conn.execute(
+        "SELECT COALESCE(SUM(completion_tokens), 0) as c FROM api_usage_log"
+    ).fetchone()['c']
     conn.close()
     return json_response({
         "total_users": total,
         "verified_users": verified,
-        "active_users": active
+        "unverified_users": max(0, total - verified),
+        "active_users": active,
+        "total_upload_tokens": upload,
+        "total_download_tokens": download,
+        "total_used_tokens": upload + download
     })
+
+
+@app.route('/api/admin/token-stats', methods=['GET'])
+@require_admin
+def admin_token_stats():
+    conn = get_db()
+    upload = conn.execute(
+        "SELECT COALESCE(SUM(prompt_tokens), 0) as c FROM api_usage_log"
+    ).fetchone()['c']
+    download = conn.execute(
+        "SELECT COALESCE(SUM(completion_tokens), 0) as c FROM api_usage_log"
+    ).fetchone()['c']
+    total = upload + download
+    user_count = conn.execute(
+        "SELECT COUNT(*) as c FROM users"
+    ).fetchone()['c']
+    conn.close()
+    return json_response({
+        "upload_tokens": upload,
+        "download_tokens": download,
+        "total_tokens": total,
+        "user_count": user_count
+    })
+
+
+# ==================== 管理任务模块 ====================
+
+@app.route('/api/admin/tasks', methods=['GET'])
+@require_admin
+def admin_list_tasks():
+    conn = get_db()
+    tasks = conn.execute(
+        "SELECT * FROM admin_tasks ORDER BY created_at ASC LIMIT 200"
+    ).fetchall()
+    conn.close()
+    return json_response({"tasks": [dict(t) for t in tasks]})
+
+
+@app.route('/api/admin/tasks', methods=['POST'])
+@require_admin
+def admin_create_task():
+    data = request.get_json()
+    title = (data.get('title') or '').strip()
+    if not title:
+        return json_response({"error": "请输入任务标题"}, 400)
+    description = (data.get('description') or '').strip()
+    priority = int(data.get('priority', 2))
+    conn = get_db()
+    user = request.current_user
+    cur = conn.execute(
+        "INSERT INTO admin_tasks (title, description, priority, created_by) VALUES (?, ?, ?, ?)",
+        (title, description, priority, user['id']))
+    task_id = cur.lastrowid
+    conn.commit()
+    task = conn.execute(
+        "SELECT * FROM admin_tasks WHERE id = ?", (task_id,)).fetchone()
+    conn.close()
+    log_admin_action(user, 'create_task', 'admin_tasks', task_id, f"创建任务: {title}")
+    return json_response({"task": dict(task), "message": "任务已创建"})
+
+
+@app.route('/api/admin/tasks/<int:task_id>', methods=['PUT'])
+@require_admin
+def admin_update_task(task_id):
+    data = request.get_json()
+    conn = get_db()
+    task = conn.execute(
+        "SELECT * FROM admin_tasks WHERE id = ?", (task_id,)).fetchone()
+    if not task:
+        conn.close()
+        return json_response({"error": "任务不存在"}, 404)
+    updates = ["updated_at = datetime('now')"]
+    params = []
+    for field in ['title', 'description', 'status', 'priority', 'assigned_to']:
+        if field in data:
+            updates.append(f"{field} = ?")
+            params.append(data[field])
+    if 'status' in data and data['status'] in ('completed', 'failed', 'canceled'):
+        updates.append("completed_at = datetime('now')")
+    if params:
+        params.append(task_id)
+        conn.execute(
+            f"UPDATE admin_tasks SET {', '.join(updates)} WHERE id = ?",
+            params)
+        conn.commit()
+    task = conn.execute(
+        "SELECT * FROM admin_tasks WHERE id = ?", (task_id,)).fetchone()
+    conn.close()
+    user = request.current_user
+    log_admin_action(user, 'update_task', 'admin_tasks', task_id, f"更新任务: {task['title']}")
+    return json_response({"task": dict(task), "message": "任务已更新"})
+
+
+@app.route('/api/admin/tasks/<int:task_id>', methods=['DELETE'])
+@require_admin
+def admin_delete_task(task_id):
+    conn = get_db()
+    task = conn.execute(
+        "SELECT * FROM admin_tasks WHERE id = ?", (task_id,)).fetchone()
+    if not task:
+        conn.close()
+        return json_response({"error": "任务不存在"}, 404)
+    conn.execute("DELETE FROM admin_tasks WHERE id = ?", (task_id,))
+    conn.commit()
+    conn.close()
+    user = request.current_user
+    log_admin_action(user, 'delete_task', 'admin_tasks', task_id, f"删除任务: {task['title']}")
+    return json_response({"message": "任务已删除"})
+
+
+@app.route('/api/admin/tasks/cleanup', methods=['POST'])
+@require_admin
+def admin_cleanup_tasks():
+    conn = get_db()
+    deleted = conn.execute(
+        "DELETE FROM admin_tasks WHERE created_at < datetime('now', '-7 days') AND status IN ('completed','canceled')"
+    ).rowcount
+    conn.commit()
+    conn.close()
+    return json_response({"message": f"已清理 {deleted} 条过期任务"})
 
 
 @app.route('/api/admin/ip-bans', methods=['GET'])
@@ -3876,14 +4028,14 @@ def calculate_tokens(text: str) -> int:
 
 # ==================== API 路由 ====================
 
-def load_space_context(space_id: int, user_id: int) -> list:
+def load_space_context(space_id: int, user_id: int):
     conn = get_db()
     space = conn.execute(
         "SELECT id FROM user_spaces WHERE id = ? AND user_id = ?",
         (space_id, user_id)).fetchone()
     if not space:
         conn.close()
-        return None
+        return None, 0
     settings = conn.execute(
         "SELECT max_context_messages, max_context_tokens FROM user_context_settings WHERE user_id = ?",
         (user_id,)).fetchone()
@@ -3895,18 +4047,18 @@ def load_space_context(space_id: int, user_id: int) -> list:
         (space_id,)).fetchall()
     conn.close()
     context_messages = []
-    total_tokens = 0
+    total_loaded_tokens = 0
     for ctx in reversed(contexts):
         if len(context_messages) >= max_messages:
             break
-        if total_tokens + (ctx['token_count'] or 0) > max_tokens:
+        if total_loaded_tokens + (ctx['token_count'] or 0) > max_tokens:
             break
         context_messages.insert(0, {
             "role": ctx['role'],
             "content": ctx['content']
         })
-        total_tokens += ctx['token_count'] or 0
-    return context_messages
+        total_loaded_tokens += ctx['token_count'] or 0
+    return context_messages, total_loaded_tokens
 
 
 def save_space_context(space_id: int, user_id: int, role: str, content: str):
@@ -3920,11 +4072,9 @@ def save_space_context(space_id: int, user_id: int, role: str, content: str):
     conn.close()
 
 
-def load_room_context(room_id: str) -> list:
-    # load contexts for a given room_id, only last 7 days
+def load_room_context(room_id: str):
     conn = get_db()
     settings = None
-    # we can't easily tie settings to a room, so use sensible defaults
     max_messages = 20
     max_tokens = 4000
     seven_days_ago = (datetime.utcnow() - timedelta(days=7)).strftime('%Y-%m-%d %H:%M:%S')
@@ -3934,20 +4084,20 @@ def load_room_context(room_id: str) -> list:
         (room_id, seven_days_ago)).fetchall()
     conn.close()
     if contexts is None:
-        return []
+        return [], 0
     context_messages = []
-    total_tokens = 0
+    total_loaded_tokens = 0
     for ctx in reversed(contexts):
         if len(context_messages) >= max_messages:
             break
-        if total_tokens + (ctx['token_count'] or 0) > max_tokens:
+        if total_loaded_tokens + (ctx['token_count'] or 0) > max_tokens:
             break
         context_messages.insert(0, {
             "role": ctx['role'],
             "content": ctx['content']
         })
-        total_tokens += ctx['token_count'] or 0
-    return context_messages
+        total_loaded_tokens += ctx['token_count'] or 0
+    return context_messages, total_loaded_tokens
 
 
 def save_room_context(room_id: str, user_id: int, role: str, content: str):
@@ -3991,16 +4141,18 @@ def chat_completions():
                 {"error": "AI服务未配置，请联系管理员"}, 500)
 
         context_messages = []
+        loaded_context_tokens = 0
         if space_id is not None:
-            space_context = load_space_context(space_id, user['id'])
+            space_context, loaded_context_tokens = load_space_context(space_id, user['id'])
             if space_context is None:
                 return json_response({"error": "空间不存在"}, 404)
             context_messages = space_context
-            logger.info(f"加载了 {len(context_messages)} 条历史上下文")
+            logger.info(f"加载了 {len(context_messages)} 条历史上下文, 共 {loaded_context_tokens} tokens")
         else:
-            room_context = load_room_context(room_id)
+            room_context, room_loaded_tokens = load_room_context(room_id)
             context_messages = room_context
-            logger.info(f"按 room_id 加载了 {len(context_messages)} 条历史上下文 (room: {room_id})")
+            loaded_context_tokens = room_loaded_tokens
+            logger.info(f"按 room_id 加载了 {len(context_messages)} 条历史上下文, 共 {loaded_context_tokens} tokens (room: {room_id})")
 
         augmented_messages = context_messages + messages
 
@@ -4105,6 +4257,7 @@ def chat_completions():
                     "token": remaining_tokens,
                     "space_tokens": space_tokens,
                     "context_messages": len(context_messages),
+                    "context_tokens": loaded_context_tokens,
                     "context_type": ("space" if space_id is not None else "room")
                 }
             }
@@ -4383,8 +4536,14 @@ def list_xfyun_batches():
         limit = request.args.get('limit', 10, type=int)
         after = request.args.get('after', None)
         result = ADAPTER.list_batches(limit=limit, after=after)
+        logger.info(f"[DEBUG] list_batches result: {result}")
         if not result:
             return json_response({"error": "查询批处理列表失败"}, 500)
+        data = result.get('data', [])
+        logger.info(f"[DEBUG] data type: {type(data)}, len: {len(data) if isinstance(data, list) else 'N/A'}")
+        if isinstance(data, list):
+            data.sort(key=lambda b: b.get('created_at', ''), reverse=True)
+            result['data'] = data
         return json_response(result)
     except Exception as e:
         logger.error(f"查询批处理列表失败: {str(e)}")
@@ -4459,6 +4618,7 @@ def batch_sse():
     def generate():
         last_batches_hash = ''
         last_files_hash = ''
+        last_stats_hash = ''
         def _hash(data):
             return hashlib.md5(json.dumps(data, sort_keys=True, default=str, ensure_ascii=False).encode()).hexdigest()
         try:
@@ -4474,7 +4634,7 @@ def batch_sse():
             logger.error(f"SSE 初始数据推送失败: {e}")
         while True:
             try:
-                time.sleep(2)
+                time.sleep(3)
                 batches = ADAPTER.list_batches()
                 if batches:
                     h = _hash(batches)

@@ -194,7 +194,8 @@ export default function ErrorPage() {
           fontSize: '0.75rem',
           color: 'var(--gray-500)'
         }}>
-          DingDang Cloud · 如问题持续存在，请联系管理员
+          DingDang Cloud · <a href="https://github.com/dingdang6283/ai-server" target="_blank" rel="noopener noreferrer"
+            style={{ color: 'inherit' }}>github.com/dingdang6283/ai-server</a> · 如问题持续存在，请联系管理员
         </div>
       </div>
     </div>
