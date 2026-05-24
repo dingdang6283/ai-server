@@ -982,6 +982,7 @@ function BatchManagementTab({ showToast, showLoading, closeToast }: { showToast:
   const [activeSubTab, setActiveSubTab] = useState<'requests' | 'files'>('requests')
   const [selectedRequest, setSelectedRequest] = useState<BatchRequest | null>(null)
   const [connected, setConnected] = useState(false)
+  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'polling'>('connecting')
   const socketRef = useRef<Socket | null>(null)
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const mountedRef = useRef(true)
@@ -1016,15 +1017,20 @@ function BatchManagementTab({ showToast, showLoading, closeToast }: { showToast:
     const socket = io(wsUrl, {
       transports: ['polling', 'websocket'],
       reconnection: true,
-      reconnectionAttempts: 5,
-      reconnectionDelay: 2000,
-      timeout: 10000,
+      reconnectionAttempts: 10,
+      reconnectionDelay: 3000,
+      reconnectionDelayMax: 10000,
+      timeout: 30000,
     })
 
     const startPolling = () => {
-      if (pollTimerRef.current) return
-      pollTimerRef.current = setInterval(loadRequests, 3000)
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current)
+      }
+      pollTimerRef.current = setInterval(loadRequests, 1000)
       console.log('[Batch] 开始轮询模式')
+      setConnectionStatus('polling')
+      loadRequests()
     }
 
     const stopPolling = () => {
@@ -1038,6 +1044,7 @@ function BatchManagementTab({ showToast, showLoading, closeToast }: { showToast:
     socket.on('connect', () => {
       console.log('[WebSocket] 已连接')
       setConnected(true)
+      setConnectionStatus('connected')
       stopPolling()
       socket.emit('join_admin_batch')
     })
@@ -1045,12 +1052,30 @@ function BatchManagementTab({ showToast, showLoading, closeToast }: { showToast:
     socket.on('disconnect', () => {
       console.log('[WebSocket] 已断开')
       setConnected(false)
+      setConnectionStatus('disconnected')
       startPolling()
     })
 
     socket.on('connect_error', (err: any) => {
       console.log('[WebSocket] 连接失败:', err.message)
       setConnected(false)
+      setConnectionStatus('disconnected')
+      startPolling()
+    })
+
+    socket.on('reconnect_attempt', (attempt: number) => {
+      console.log('[WebSocket] 重连尝试:', attempt)
+      setConnectionStatus('connecting')
+    })
+
+    socket.on('reconnect_error', (err: any) => {
+      console.log('[WebSocket] 重连失败:', err.message)
+      setConnectionStatus('disconnected')
+    })
+
+    socket.on('reconnect_failed', () => {
+      console.log('[WebSocket] 重连失败，切换到轮询')
+      setConnectionStatus('polling')
       startPolling()
     })
 
@@ -1170,12 +1195,16 @@ function BatchManagementTab({ showToast, showLoading, closeToast }: { showToast:
           Xfyun 文件列表
         </button>
         <span style={{
-          fontSize: '0.6rem', padding: '0.1rem 0.3rem', borderRadius: 3,
-          color: connected ? '#22c55e' : '#ef4444',
-          border: `1px solid ${connected ? '#22c55e' : '#ef4444'}`,
-          marginLeft: 'auto'
+          fontSize: '0.7rem', padding: '0.3rem 0.5rem', borderRadius: 4,
+          color: connectionStatus === 'connected' ? '#22c55e' : connectionStatus === 'connecting' ? '#eab308' : '#ef4444',
+          border: `1px solid ${connectionStatus === 'connected' ? '#22c55e' : connectionStatus === 'connecting' ? '#eab308' : '#ef4444'}`,
+          marginLeft: 'auto',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.3rem'
         }}>
-          {connected ? '实时推送' : '未连接'}
+          <span>{connectionStatus === 'connected' ? '🟢' : connectionStatus === 'connecting' ? '🟡' : '🔴'}</span>
+          <span>{connectionStatus === 'connected' ? '实时推送' : connectionStatus === 'connecting' ? '连接中...' : connectionStatus === 'polling' ? '轮询模式' : '未连接'}</span>
         </span>
       </div>
 
