@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
+import { io, Socket } from 'socket.io-client'
 import { adminApi, aiApi } from '../services/api'
 import { useToast } from '../components/Toast'
-import type { AdminUser, TokenConfig, UsageStats, IPBan, IPTracking, AuditLogEntry, AdminTask } from '../types/api'
+import type { AdminUser, TokenConfig, UsageStats, IPBan, IPTracking, AuditLogEntry, AdminTask, BatchRequest } from '../types/api'
 
 type AdminTab = 'users' | 'ip_monitor' | 'ip_bans' | 'audit_log' | 'batch' | 'tasks'
 
@@ -20,7 +21,7 @@ const TAB_NAMES: Record<AdminTab, string> = {
 
 export default function AdminPanel() {
   const [activeTab, setActiveTab] = useState<AdminTab>('users')
-  const { showToast, showConfirm } = useToast()
+  const { showToast, showConfirm, showLoading, closeToast } = useToast()
 
   return (
     <div className="container">
@@ -57,7 +58,7 @@ export default function AdminPanel() {
       {activeTab === 'ip_monitor' && <IpMonitorTab showToast={showToast} />}
       {activeTab === 'ip_bans' && <IpBansTab showToast={showToast} showConfirm={showConfirm} />}
       {activeTab === 'audit_log' && <AuditLogTab showToast={showToast} />}
-      {activeTab === 'batch' && <BatchManagementTab showToast={showToast} />}
+      {activeTab === 'batch' && <BatchManagementTab showToast={showToast} showLoading={showLoading} closeToast={closeToast} />}
       {activeTab === 'tasks' && <TasksManagementTab showToast={showToast} />}
     </div>
   )
@@ -975,172 +976,159 @@ function IpMonitorTab({ showToast }: { showToast: any }) {
       )
     }
 
-function BatchManagementTab({ showToast }: { showToast: any }) {
-  const [batches, setBatches] = useState<any[]>([])
+function BatchManagementTab({ showToast, showLoading, closeToast }: { showToast: any; showLoading: any; closeToast: any }) {
+  const [requests, setRequests] = useState<BatchRequest[]>([])
   const [files, setFiles] = useState<any[]>([])
-  const [activeSubTab, setActiveSubTab] = useState<'files' | 'batches'>('batches')
-  const [loading, setLoading] = useState(false)
-  const [selectedBatchId, setSelectedBatchId] = useState<string>('')
-  const [batchDetail, setBatchDetail] = useState<any>(null)
-  const [batchDetailLoading, setBatchDetailLoading] = useState(false)
-  const [batchResults, setBatchResults] = useState<any>(null)
-  const [batchResultsLoading, setBatchResultsLoading] = useState(false)
-  const refreshTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [activeSubTab, setActiveSubTab] = useState<'requests' | 'files'>('requests')
+  const [selectedRequest, setSelectedRequest] = useState<BatchRequest | null>(null)
+  const [connected, setConnected] = useState(false)
+  const socketRef = useRef<Socket | null>(null)
+  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const mountedRef = useRef(true)
 
   useEffect(() => {
     return () => { mountedRef.current = false }
   }, [])
 
-  const sortByTime = (list: any[]) =>
-    list.slice().sort((a: any, b: any) =>
-      ('' + (b.created_at || '')).localeCompare('' + (a.created_at || '')))
-
-  const loadBatches = async () => {
+  const loadRequests = async () => {
     try {
-      const res = await aiApi.listBatches()
-      console.log('[DEBUG] listBatches response:', res)
-      console.log('[DEBUG] res.data:', res?.data)
-      console.log('[DEBUG] res.data length:', res?.data?.length)
-      if (mountedRef.current) setBatches(sortByTime(res?.data || []))
+      const res = await adminApi.getBatchRequests({ limit: 100 })
+      if (mountedRef.current) setRequests(res?.requests || [])
     } catch (err: any) {
-      console.error('[DEBUG] loadBatches error:', err)
-      showToast(err.message || '加载批处理失败', 'error')
+      console.error('加载批处理记录失败:', err)
     }
   }
 
   const loadFiles = async () => {
     try {
       const res = await aiApi.listFiles()
-      if (mountedRef.current) setFiles(sortByTime(res?.data || []))
+      if (mountedRef.current) setFiles(res?.data || [])
     } catch (err: any) {
       showToast(err.message || '加载文件失败', 'error')
     }
   }
 
-  const refreshAll = () => {
-    loadBatches()
-    loadFiles()
-  }
-
   useEffect(() => {
-    refreshAll()
-    refreshTimerRef.current = setInterval(refreshAll, 3000)
+    loadRequests()
+    loadFiles()
+
+    const wsUrl = window.location.origin.replace(/^http/, 'ws')
+    const socket = io(wsUrl, {
+      transports: ['polling', 'websocket'],
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 2000,
+      timeout: 10000,
+    })
+
+    const startPolling = () => {
+      if (pollTimerRef.current) return
+      pollTimerRef.current = setInterval(loadRequests, 3000)
+      console.log('[Batch] 开始轮询模式')
+    }
+
+    const stopPolling = () => {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current)
+        pollTimerRef.current = null
+        console.log('[Batch] 停止轮询模式')
+      }
+    }
+
+    socket.on('connect', () => {
+      console.log('[WebSocket] 已连接')
+      setConnected(true)
+      stopPolling()
+      socket.emit('join_admin_batch')
+    })
+
+    socket.on('disconnect', () => {
+      console.log('[WebSocket] 已断开')
+      setConnected(false)
+      startPolling()
+    })
+
+    socket.on('connect_error', (err: any) => {
+      console.log('[WebSocket] 连接失败:', err.message)
+      setConnected(false)
+      startPolling()
+    })
+
+    socket.on('batch_update', (data: { type: string; requests?: BatchRequest[]; request?: BatchRequest }) => {
+      console.log('[WebSocket] 收到批处理更新:', data)
+      if (data.requests) {
+        setRequests(data.requests)
+      } else if (data.request) {
+        setRequests(prev => {
+          const idx = prev.findIndex(r => r.job_id === data.request!.job_id)
+          if (idx >= 0) {
+            const newRequests = [...prev]
+            newRequests[idx] = data.request!
+            return newRequests
+          }
+          return [data.request!, ...prev]
+        })
+      }
+    })
+
+    socketRef.current = socket
+
+    setTimeout(() => {
+      if (!socket.connected) {
+        console.log('[WebSocket] 连接超时，启用轮询')
+        startPolling()
+      }
+    }, 5000)
+
     return () => {
-      if (refreshTimerRef.current) clearInterval(refreshTimerRef.current)
+      socket.disconnect()
+      stopPolling()
     }
   }, [])
 
-  const handleQueryBatch = async () => {
-    if (!selectedBatchId.trim()) return
-    setBatchDetailLoading(true)
-    setBatchDetail(null)
-    try {
-      const res = await aiApi.getBatchStatus(selectedBatchId.trim())
-      setBatchDetail(res)
-    } catch (err: any) {
-      showToast(err.message || '查询失败', 'error')
-    } finally {
-      setBatchDetailLoading(false)
-    }
-  }
-
-  const handleCancelBatch = async (batchId: string) => {
-    try {
-      const res = await aiApi.cancelBatch(batchId)
-      showToast(res?.status || '已取消', 'success')
-      refreshAll()
-    } catch (err: any) {
-      showToast(err.message || '取消失败', 'error')
-    }
-  }
+  useEffect(() => {
+    loadFiles()
+  }, [])
 
   const handleDeleteFile = async (fileId: string) => {
     try {
       const res = await aiApi.deleteFile(fileId)
       showToast(res?.deleted ? '已删除' : '删除失败', res?.deleted ? 'success' : 'error')
-      refreshAll()
+      loadFiles()
     } catch (err: any) {
       showToast(err.message || '删除失败', 'error')
     }
   }
 
-  const loadResults = async (batchId: string) => {
-    setBatchResultsLoading(true)
-    setBatchResults(null)
+  const formatDateTime = (dateStr: string | null | undefined) => {
+    if (!dateStr) return '-'
     try {
-      const res = await aiApi.getBatchResults(batchId)
-      setBatchResults(res)
-    } catch (err: any) {
-      showToast(err.message || '加载失败', 'error')
-    } finally {
-      setBatchResultsLoading(false)
+      const d = new Date(dateStr)
+      return d.toLocaleString('zh-CN')
+    } catch {
+      return dateStr
     }
-  }
-
-  const renderQAPairs = (requests: any[], responses: any[]) => {
-    if (!requests || requests.length === 0) {
-      return <div style={{ color: 'var(--gray-500)', padding: '0.5rem 0' }}>无请求数据</div>
-    }
-    const paired: { user_message: string; answer: string }[] = []
-    const respByCustomId: Record<string, string> = {}
-    for (const r of responses) {
-      if (r.custom_id) respByCustomId[r.custom_id] = r.answer || ''
-    }
-    for (const req of requests) {
-      const answer = req.custom_id ? (respByCustomId[req.custom_id] || '') : ''
-      paired.push({ user_message: req.user_message || '', answer })
-    }
-    if (paired.length === 1 && !paired[0].user_message && !paired[0].answer) {
-      return <div style={{ color: 'var(--gray-500)', padding: '0.5rem 0' }}>无问答数据</div>
-    }
-    return (
-      <div style={{ fontSize: '0.75rem' }}>
-        {paired.map((p, i) => (
-          <div key={i} style={{
-            marginBottom: '0.75rem', padding: '0.5rem',
-            border: '1px solid var(--border)',
-            borderRadius: '6px', background: 'var(--surface-1)'
-          }}>
-            <div style={{ marginBottom: '0.3rem' }}>
-              <span style={{ color: 'var(--info)', fontWeight: 600 }}>Q{i + 1}: </span>
-              <span style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                {p.user_message || <span style={{ color: 'var(--gray-500)' }}>（空）</span>}
-              </span>
-            </div>
-            <div>
-              <span style={{ color: 'var(--success)', fontWeight: 600 }}>A{i + 1}: </span>
-              <span style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                {p.answer || <span style={{ color: 'var(--gray-500)' }}>（无回答）</span>}
-              </span>
-            </div>
-          </div>
-        ))}
-      </div>
-    )
-  }
-
-  const formatTime = (ts: number | null | undefined) => {
-    if (!ts) return '-'
-    return new Date(ts * 1000).toLocaleString('zh-CN')
   }
 
   const statusTag = (status: string) => {
     const colorMap: Record<string, string> = {
       completed: 'var(--success)',
       failed: 'var(--error)',
-      in_progress: 'var(--primary-500)',
-      queuing: 'var(--warning)',
-      finalizing: 'var(--info)',
-      expired: 'var(--gray-500)',
-      canceled: 'var(--danger)'
+      processing: 'var(--primary-500)',
+      queued: 'var(--warning)'
+    }
+    const labelMap: Record<string, string> = {
+      completed: '已完成',
+      failed: '失败',
+      processing: '处理中',
+      queued: '排队中'
     }
     return (
       <span style={{
         color: colorMap[status] || 'var(--gray-400)',
         fontWeight: 600, fontSize: '0.75rem'
       }}>
-        {status}
+        {labelMap[status] || status}
       </span>
     )
   }
@@ -1165,12 +1153,17 @@ function BatchManagementTab({ showToast }: { showToast: any }) {
     )
   }
 
+  const formatTime = (ts: number | null | undefined) => {
+    if (!ts) return '-'
+    return new Date(ts * 1000).toLocaleString('zh-CN')
+  }
+
   return (
     <div>
       <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem', alignItems: 'center' }}>
-        <button className={`btn btn-sm ${activeSubTab === 'batches' ? 'btn-primary' : 'btn-secondary'}`}
-          onClick={() => setActiveSubTab('batches')}>
-          Xfyun 批次列表
+        <button className={`btn btn-sm ${activeSubTab === 'requests' ? 'btn-primary' : 'btn-secondary'}`}
+          onClick={() => setActiveSubTab('requests')}>
+          用户批处理记录
         </button>
         <button className={`btn btn-sm ${activeSubTab === 'files' ? 'btn-primary' : 'btn-secondary'}`}
           onClick={() => setActiveSubTab('files')}>
@@ -1178,120 +1171,117 @@ function BatchManagementTab({ showToast }: { showToast: any }) {
         </button>
         <span style={{
           fontSize: '0.6rem', padding: '0.1rem 0.3rem', borderRadius: 3,
-          color: '#22c55e', border: '1px solid #22c55e',
+          color: connected ? '#22c55e' : '#ef4444',
+          border: `1px solid ${connected ? '#22c55e' : '#ef4444'}`,
           marginLeft: 'auto'
         }}>
-          自动刷新
+          {connected ? '实时推送' : '未连接'}
         </span>
       </div>
 
-      {loading ? (
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '2rem', color: 'var(--gray-400)' }}>
-          <span className="spinner" /> 加载中...
-        </div>
-      ) : activeSubTab === 'batches' ? (
+      {activeSubTab === 'requests' ? (
         <>
-          <div className="card" style={{ marginBottom: '1rem', padding: '0.75rem' }}>
-            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-              <input className="input" type="text" placeholder="输入 batch_id 查询状态 (batch_xxx)"
-                value={selectedBatchId}
-                onChange={e => setSelectedBatchId(e.target.value)}
-                style={{ flex: 1, fontFamily: 'monospace' }} />
-              <button className="btn btn-primary btn-sm" onClick={handleQueryBatch}
-                disabled={batchDetailLoading || !selectedBatchId.trim()}>
-                {batchDetailLoading ? '查询中...' : '查询'}
-              </button>
-            </div>
-          </div>
-
-          {batchDetail && (
-            <div className="card" style={{ marginBottom: '1rem', padding: '0.75rem', overflowX: 'auto' }}>
+          {selectedRequest && (
+            <div className="card" style={{ marginBottom: '1rem', padding: '0.75rem' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-                <h4 style={{ margin: 0 }}>批次详情: {batchDetail.id}</h4>
-                <button className="btn btn-secondary btn-sm" onClick={() => setBatchDetail(null)}>关闭</button>
+                <h4 style={{ margin: 0 }}>请求详情: {selectedRequest.job_id}</h4>
+                <button className="btn btn-secondary btn-sm" onClick={() => setSelectedRequest(null)}>关闭</button>
               </div>
-              <div className="code-block" style={{ fontSize: '0.75rem' }}>
-                {JSON.stringify(batchDetail, null, 2)}
+              <div style={{ fontSize: '0.75rem' }}>
+                <p><strong>用户:</strong> {selectedRequest.username} (ID: {selectedRequest.user_id})</p>
+                <p><strong>模型:</strong> {selectedRequest.model}</p>
+                <p><strong>状态:</strong> {statusTag(selectedRequest.status)}</p>
+                <p><strong>创建时间:</strong> {formatDateTime(selectedRequest.created_at)}</p>
+                <p><strong>更新时间:</strong> {formatDateTime(selectedRequest.updated_at)}</p>
+                <div style={{ marginTop: '0.5rem' }}>
+                  <strong>用户输入:</strong>
+                  <div style={{ 
+                    background: 'var(--surface-1)', padding: '0.5rem', 
+                    borderRadius: '4px', marginTop: '0.25rem',
+                    whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                    maxHeight: '150px', overflow: 'auto'
+                  }}>
+                    {selectedRequest.prompt || '（空）'}
+                  </div>
+                </div>
+                {selectedRequest.result && (
+                  <div style={{ marginTop: '0.5rem' }}>
+                    <strong>AI 回复:</strong>
+                    <div style={{ 
+                      background: 'var(--surface-1)', padding: '0.5rem', 
+                      borderRadius: '4px', marginTop: '0.25rem',
+                      whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                      maxHeight: '200px', overflow: 'auto'
+                    }}>
+                      {selectedRequest.result}
+                    </div>
+                  </div>
+                )}
+                {selectedRequest.error && (
+                  <div style={{ marginTop: '0.5rem' }}>
+                    <strong style={{ color: 'var(--error)' }}>错误信息:</strong>
+                    <div style={{ 
+                      background: 'rgba(239,68,68,0.1)', padding: '0.5rem', 
+                      borderRadius: '4px', marginTop: '0.25rem',
+                      color: 'var(--error)'
+                    }}>
+                      {selectedRequest.error}
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
-          )}
-
-          {batchResultsLoading && (
-            <div className="card" style={{ marginBottom: '1rem', padding: '1rem' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--gray-400)' }}>
-                <span className="spinner" /> 加载问答结果...
-              </div>
-            </div>
-          )}
-
-          {batchResults && (
-            <div className="card" style={{ marginBottom: '1rem', padding: '0.75rem', overflowX: 'auto' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-                <h4 style={{ margin: 0 }}>问答结果: {batchResults.batch_id}</h4>
-                <button className="btn btn-secondary btn-sm" onClick={() => setBatchResults(null)}>关闭</button>
-              </div>
-              {renderQAPairs(batchResults.requests, batchResults.responses)}
             </div>
           )}
 
           <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
-            <table style={{ fontSize: '0.75rem', width: '100%', minWidth: 800 }}>
+            <table style={{ fontSize: '0.75rem', width: '100%', minWidth: 900 }}>
               <thead>
                 <tr>
-                  <th>Batch ID</th>
+                  <th>用户</th>
+                  <th>Job ID</th>
+                  <th>模型</th>
                   <th>状态</th>
+                  <th>输入预览</th>
+                  <th>Token</th>
                   <th>创建时间</th>
-                  <th>完成时间</th>
-                  <th>输入文件</th>
-                  <th>输出文件</th>
-                  <th>请求数</th>
-                  <th>成功/失败</th>
                   <th>操作</th>
                 </tr>
               </thead>
               <tbody>
-                {batches.length === 0 ? (
+                {requests.length === 0 ? (
                   <tr>
-                    <td colSpan={9} style={{ textAlign: 'center', padding: '2rem', color: 'var(--gray-500)' }}>
-                      暂无批次数据
+                    <td colSpan={8} style={{ textAlign: 'center', padding: '2rem', color: 'var(--gray-500)' }}>
+                      暂无批处理记录
                     </td>
                   </tr>
-                ) : batches.map((b: any, i: number) => (
-                  <tr key={b.id || i}>
-                    <td style={{ fontFamily: 'monospace', maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {b.id}
-                    </td>
-                    <td>{statusTag(b.status)}</td>
-                    <td>{formatTime(b.created_at)}</td>
-                    <td>{formatTime(b.completed_at)}</td>
-                    <td style={{ fontFamily: 'monospace', maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis', fontSize: '0.65rem' }}>
-                      {b.input_file_id || '-'}
-                    </td>
-                    <td style={{ fontFamily: 'monospace', maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis', fontSize: '0.65rem' }}>
-                      {b.output_file_id || '-'}
-                    </td>
-                    <td>{b.request_counts?.total || 0}</td>
+                ) : requests.map((r: any) => (
+                  <tr key={r.id}>
                     <td>
-                      <span style={{ color: 'var(--success)' }}>{b.request_counts?.completed || 0}</span>
-                      /<span style={{ color: 'var(--error)' }}>{b.request_counts?.failed || 0}</span>
+                      <span style={{ fontWeight: 600 }}>{r.username}</span>
+                      <span style={{ color: 'var(--gray-500)', fontSize: '0.65rem', marginLeft: '0.25rem' }}>
+                        (#{r.user_id})
+                      </span>
+                    </td>
+                    <td style={{ fontFamily: 'monospace', fontSize: '0.65rem', maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {r.job_id}
+                    </td>
+                    <td>{r.model}</td>
+                    <td>{statusTag(r.status)}</td>
+                    <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {r.prompt || '-'}
                     </td>
                     <td>
-                      <div style={{ display: 'flex', gap: '0.3rem', alignItems: 'center', flexWrap: 'wrap' }}>
-                        {b.status === 'queuing' || b.status === 'in_progress' ? (
-                          <button className="btn btn-danger btn-sm"
-                            onClick={() => handleCancelBatch(b.id)}
-                            style={{ fontSize: '0.65rem', padding: '0.15rem 0.4rem' }}>
-                            取消
-                          </button>
-                        ) : null}
-                        {b.status === 'completed' && (
-                          <button className="btn btn-primary btn-sm"
-                            onClick={() => loadResults(b.id)}
-                            style={{ fontSize: '0.65rem', padding: '0.15rem 0.4rem' }}>
-                            结果
-                          </button>
-                        )}
-                      </div>
+                      <span style={{ color: 'var(--info)' }}>{r.prompt_tokens || 0}</span>
+                      {' / '}
+                      <span style={{ color: 'var(--success)' }}>{r.result_tokens || 0}</span>
+                    </td>
+                    <td style={{ fontSize: '0.65rem' }}>{formatDateTime(r.created_at)}</td>
+                    <td>
+                      <button className="btn btn-primary btn-sm"
+                        onClick={() => setSelectedRequest(r)}
+                        style={{ fontSize: '0.65rem', padding: '0.15rem 0.4rem' }}>
+                        详情
+                      </button>
                     </td>
                   </tr>
                 ))}
@@ -1341,24 +1331,6 @@ function BatchManagementTab({ showToast }: { showToast: any }) {
           </table>
         </div>
       )}
-
-      <div className="card" style={{ marginTop: '1rem' }}>
-        <h4 style={{ marginBottom: '0.75rem' }}>批处理状态说明</h4>
-        <table style={{ fontSize: '0.75rem' }}>
-          <thead>
-            <tr><th>状态</th><th>说明</th></tr>
-          </thead>
-          <tbody>
-            <tr><td>{statusTag('queuing')}</td><td>排队中，等待处理</td></tr>
-            <tr><td>{statusTag('in_progress')}</td><td>正在处理</td></tr>
-            <tr><td>{statusTag('finalizing')}</td><td>结果上传中</td></tr>
-            <tr><td>{statusTag('completed')}</td><td>处理完成</td></tr>
-            <tr><td>{statusTag('failed')}</td><td>处理失败</td></tr>
-            <tr><td>{statusTag('expired')}</td><td>超时</td></tr>
-            <tr><td>{statusTag('canceled')}</td><td>已取消</td></tr>
-          </tbody>
-        </table>
-      </div>
     </div>
   )
 }

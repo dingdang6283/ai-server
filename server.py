@@ -4,6 +4,7 @@ DingDang Cloud - 讯飞星火批处理API -> 千问(Qwen) API 格式适配器
 """
 
 from flask import Flask, request, Response, send_from_directory
+from flask_socketio import SocketIO, emit, join_room, leave_room
 import requests
 import json
 import time
@@ -122,6 +123,8 @@ app.config['JSON_AS_ASCII'] = False
 app.config['JSONIFY_MIMETYPE'] = 'application/json; charset=utf-8'
 app.config['SECRET_KEY'] = CFG['app']['secret_key']
 app.config['TOKEN_SERIALIZER'] = URLSafeTimedSerializer(app.config['SECRET_KEY'])
+
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
 db_cfg = CFG['database']
@@ -416,6 +419,33 @@ def init_db():
             FOREIGN KEY (created_by) REFERENCES users(id),
             FOREIGN KEY (assigned_to) REFERENCES users(id)
         )
+    ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS batch_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            job_id TEXT NOT NULL UNIQUE,
+            model TEXT DEFAULT 'qwen',
+            prompt TEXT DEFAULT '',
+            prompt_tokens INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'queued' CHECK(status IN ('queued','processing','completed','failed')),
+            result TEXT,
+            result_tokens INTEGER DEFAULT 0,
+            error TEXT,
+            xfyun_batch_id TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    ''')
+    conn.execute('''
+        CREATE INDEX IF NOT EXISTS idx_batch_requests_created
+        ON batch_requests(created_at)
+    ''')
+    conn.execute('''
+        CREATE INDEX IF NOT EXISTS idx_batch_requests_user
+        ON batch_requests(user_id)
     ''')
     conn.execute('''
         CREATE INDEX IF NOT EXISTS idx_admin_tasks_created
@@ -3179,6 +3209,57 @@ def admin_cleanup_tasks():
     return json_response({"message": f"已清理 {deleted} 条过期任务"})
 
 
+@app.route('/api/admin/batch-requests', methods=['GET'])
+@require_admin
+def admin_list_batch_requests():
+    conn = get_db()
+    limit = request.args.get('limit', 100, type=int)
+    status_filter = request.args.get('status', '').strip()
+    user_filter = request.args.get('user', '').strip()
+    
+    query = "SELECT * FROM batch_requests WHERE 1=1"
+    params = []
+    
+    if status_filter:
+        query += " AND status = ?"
+        params.append(status_filter)
+    if user_filter:
+        query += " AND (username LIKE ? OR user_id = ?)"
+        params.extend([f'%{user_filter}%', user_filter])
+    
+    query += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    
+    requests = conn.execute(query, params).fetchall()
+    conn.close()
+    return json_response({"requests": [dict(r) for r in requests]})
+
+
+@app.route('/api/admin/batch-requests/<int:request_id>', methods=['GET'])
+@require_admin
+def admin_get_batch_request(request_id):
+    conn = get_db()
+    req = conn.execute("SELECT * FROM batch_requests WHERE id = ?", (request_id,)).fetchone()
+    conn.close()
+    if not req:
+        return json_response({"error": "记录不存在"}, 404)
+    return json_response(dict(req))
+
+
+@app.route('/api/admin/batch-requests/cleanup', methods=['POST'])
+@require_admin
+def admin_cleanup_batch_requests():
+    days = request.args.get('days', 7, type=int)
+    conn = get_db()
+    deleted = conn.execute(
+        "DELETE FROM batch_requests WHERE created_at < datetime('now', ?) AND status IN ('completed','failed')",
+        (f'-{days} days',)
+    ).rowcount
+    conn.commit()
+    conn.close()
+    return json_response({"message": f"已清理 {deleted} 条过期记录"})
+
+
 @app.route('/api/admin/ip-bans', methods=['GET'])
 @require_admin
 def admin_list_ip_bans():
@@ -3792,8 +3873,17 @@ class XunfeiBatchAdapter:
                    max_tokens: int = 500,
                    temperature: float = 0.7,
                    system_message: str = None,
-                   user_id: int = None) -> str:
+                   user_id: int = None,
+                   username: str = None,
+                   prompt_tokens: int = 0) -> str:
         job_id = f"job_{uuid.uuid4().hex[:12]}"
+        prompt_preview = ""
+        for msg in messages:
+            c = msg.get('content', '')
+            if isinstance(c, bytes):
+                c = c.decode('utf-8')
+            prompt_preview += c
+        
         with self._job_lock:
             self._jobs[job_id] = {
                 "id": job_id,
@@ -3801,31 +3891,44 @@ class XunfeiBatchAdapter:
                 "created_at": int(time.time()),
                 "updated_at": int(time.time()),
                 "user_id": user_id,
+                "username": username,
                 "model": model,
+                "prompt": prompt_preview[:2000],
+                "prompt_tokens": prompt_tokens,
                 "result": None,
                 "error": None
             }
+        
+        try:
+            conn = get_db()
+            conn.execute('''
+                INSERT INTO batch_requests (user_id, username, job_id, model, prompt, prompt_tokens, status)
+                VALUES (?, ?, ?, ?, ?, ?, 'queued')
+            ''', (user_id, username or 'unknown', job_id, model, prompt_preview[:2000], prompt_tokens))
+            conn.commit()
+            req = conn.execute("SELECT * FROM batch_requests WHERE job_id=?", (job_id,)).fetchone()
+            conn.close()
+            if req:
+                push_batch_update({"type": "new", "request": dict(req)})
+        except Exception as e:
+            logger.error(f"记录批处理请求失败: {e}")
+        
         thread = threading.Thread(
             target=self._process_job_background,
-            args=(job_id, messages, model, max_tokens, temperature, system_message),
+            args=(job_id, messages, model, max_tokens, temperature, system_message, user_id),
             daemon=True
         )
         thread.start()
-        prompt_preview = ""
-        for msg in messages:
-            c = msg.get('content', '')
-            if isinstance(c, bytes):
-                c = c.decode('utf-8')
-            prompt_preview += c
-        logger.info(f"异步任务已提交: job_id={job_id}, model={model}, "
-                    f"messages_len={len(messages)}, prompt_preview={prompt_preview[:80]}")
+        logger.info(f"异步任务已提交: job_id={job_id}, user={username}, model={model}, "
+                    f"prompt_tokens={prompt_tokens}, prompt_preview={prompt_preview[:80]}")
         return job_id
 
     def _process_job_background(self, job_id: str, messages: list,
                                  model: str, max_tokens: int,
                                  temperature: float,
-                                 system_message: str = None):
-        def update(status: str, result=None, error=None):
+                                 system_message: str = None,
+                                 user_id: int = None):
+        def update(status: str, result=None, error=None, result_tokens=0, prompt_tokens=0):
             with self._job_lock:
                 if job_id in self._jobs:
                     self._jobs[job_id]["status"] = status
@@ -3834,6 +3937,39 @@ class XunfeiBatchAdapter:
                         self._jobs[job_id]["result"] = result
                     if error:
                         self._jobs[job_id]["error"] = error
+            try:
+                conn = get_db()
+                if status == 'completed' and result:
+                    answer = result.get("choices", [{}])[0].get("text", "")
+                    total_tokens = prompt_tokens + result_tokens
+                    conn.execute('''
+                        UPDATE batch_requests SET status=?, result=?, result_tokens=?, prompt_tokens=?, updated_at=datetime('now')
+                        WHERE job_id=?
+                    ''', (status, answer[:4000], result_tokens, prompt_tokens, job_id))
+                    if user_id:
+                        conn.execute(
+                            "UPDATE users SET remaining_tokens = MAX(remaining_tokens - ?, 0) WHERE id = ?",
+                            (total_tokens, user_id))
+                        conn.execute(
+                            "INSERT INTO api_usage_log (user_id, prompt_tokens, completion_tokens) VALUES (?, ?, ?)",
+                            (user_id, prompt_tokens, result_tokens))
+                elif status == 'failed' and error:
+                    conn.execute('''
+                        UPDATE batch_requests SET status=?, error=?, updated_at=datetime('now')
+                        WHERE job_id=?
+                    ''', (status, str(error)[:500], job_id))
+                else:
+                    conn.execute('''
+                        UPDATE batch_requests SET status=?, updated_at=datetime('now')
+                        WHERE job_id=?
+                    ''', (status, job_id))
+                conn.commit()
+                req = conn.execute("SELECT * FROM batch_requests WHERE job_id=?", (job_id,)).fetchone()
+                conn.close()
+                if req:
+                    push_batch_update({"type": "update", "request": dict(req)})
+            except Exception as e:
+                logger.error(f"更新批处理状态失败: {e}")
         try:
             update("processing")
             logger.info(f"后台任务开始执行: job_id={job_id}")
@@ -3844,9 +3980,20 @@ class XunfeiBatchAdapter:
                 update("failed", error=result["error"])
             else:
                 answer = result.get("choices", [{}])[0].get("text", "")
+                usage = result.get("usage", {})
+                result_tokens = usage.get("completion_tokens", len(answer) // 4)
+                prompt_tokens = usage.get("prompt_tokens", 0)
+                if prompt_tokens == 0:
+                    prompt_text = ""
+                    for msg in messages:
+                        c = msg.get('content', '')
+                        if isinstance(c, bytes):
+                            c = c.decode('utf-8')
+                        prompt_text += c
+                    prompt_tokens = calculate_tokens(prompt_text)
                 logger.info(f"后台任务完成: job_id={job_id}, answer_len={len(answer)}, "
-                            f"answer_preview={answer[:80]}")
-                update("completed", result=result)
+                            f"prompt_tokens={prompt_tokens}, result_tokens={result_tokens}")
+                update("completed", result=result, result_tokens=result_tokens, prompt_tokens=prompt_tokens)
         except Exception as e:
             logger.error(f"后台任务异常: job_id={job_id}, error={str(e)}", exc_info=True)
             update("failed", error=str(e))
@@ -4217,8 +4364,43 @@ def chat_completions():
                 (user['id'], user['api_key'],
                  response['usage']['prompt_tokens'],
                  response['usage']['completion_tokens']))
+            
+            job_id = f"chat_{uuid.uuid4().hex[:12]}"
+            prompt_text = ""
+            for msg in messages:
+                c = msg.get('content', '')
+                if isinstance(c, bytes):
+                    c = c.decode('utf-8')
+                prompt_text += c
+            username = user['username'] if 'username' in user.keys() else 'unknown'
+            conn.execute('''
+                INSERT INTO batch_requests (user_id, username, job_id, model, prompt, prompt_tokens, status, result, result_tokens)
+                VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, ?)
+            ''', (user['id'], username, job_id, 'qwen', prompt_text[:2000],
+                  response['usage']['prompt_tokens'], answer_text[:4000], response['usage']['completion_tokens']))
+            
             conn.commit()
             conn.close()
+            
+            push_batch_update({
+                "type": "new",
+                "request": {
+                    "id": 0,
+                    "user_id": user['id'],
+                    "username": username,
+                    "job_id": job_id,
+                    "model": "qwen",
+                    "prompt": prompt_text[:2000],
+                    "prompt_tokens": response['usage']['prompt_tokens'],
+                    "status": "completed",
+                    "result": answer_text[:4000],
+                    "result_tokens": response['usage']['completion_tokens'],
+                    "error": None,
+                    "xfyun_batch_id": None,
+                    "created_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    "updated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+            })
 
             if space_id is not None:
                 for msg in messages:
@@ -4405,17 +4587,37 @@ def submit_batch_job():
         temperature = data.get('temperature', 0.7)
         if not messages:
             return json_response({"error": "请提供 messages"}, 400)
+        
+        prompt_text = ""
+        for msg in messages:
+            c = msg.get('content', '')
+            if isinstance(c, bytes):
+                c = c.decode('utf-8')
+            prompt_text += c
+        
+        prompt_tokens = calculate_tokens(prompt_text)
+        estimated_tokens = prompt_tokens + max_tokens
+        
+        check = check_concurrent_and_tokens(user['id'], user['api_key'] if 'api_key' in user.keys() else '', estimated_tokens)
+        if not check['success']:
+            return json_response({"error": check['error']}, 429)
+        
         system_message = None
         for msg in messages:
             if msg.get('role') == 'system':
                 system_message = msg.get('content', '')
                 break
+        
+        username = user['username'] if 'username' in user.keys() else 'unknown'
         job_id = ADAPTER.submit_job(
             messages, model, max_tokens, temperature,
-            system_message, user_id=user['id'])
+            system_message, user_id=user['id'], username=username,
+            prompt_tokens=prompt_tokens)
+        
         return json_response({
             "job_id": job_id,
             "status": "queued",
+            "prompt_tokens": prompt_tokens,
             "message": "任务已提交，可通过 /v1/batch/jobs/{job_id} 查询状态"
         })
     except Exception as e:
@@ -4536,11 +4738,9 @@ def list_xfyun_batches():
         limit = request.args.get('limit', 10, type=int)
         after = request.args.get('after', None)
         result = ADAPTER.list_batches(limit=limit, after=after)
-        logger.info(f"[DEBUG] list_batches result: {result}")
         if not result:
             return json_response({"error": "查询批处理列表失败"}, 500)
         data = result.get('data', [])
-        logger.info(f"[DEBUG] data type: {type(data)}, len: {len(data) if isinstance(data, list) else 'N/A'}")
         if isinstance(data, list):
             data.sort(key=lambda b: b.get('created_at', ''), reverse=True)
             result['data'] = data
@@ -4765,6 +4965,35 @@ def _create_proxy_protocol_server(host, port, wsgi_app):
     return _PPThreadedServer(host, port, wsgi_app, handler=_PPHandler)
 
 
+def push_batch_update(data: dict):
+    try:
+        socketio.emit('batch_update', data, room='admin_batch')
+    except Exception as e:
+        logger.error(f"推送批处理更新失败: {e}")
+
+
+@socketio.on('connect')
+def handle_connect():
+    logger.info(f"WebSocket 客户端连接: {request.sid}")
+
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    logger.info(f"WebSocket 客户端断开: {request.sid}")
+
+
+@socketio.on('join_admin_batch')
+def handle_join_admin_batch():
+    join_room('admin_batch')
+    logger.info(f"客户端 {request.sid} 加入管理员批处理房间")
+    conn = get_db()
+    requests = conn.execute(
+        "SELECT * FROM batch_requests ORDER BY created_at DESC LIMIT 100"
+    ).fetchall()
+    conn.close()
+    emit('batch_update', {"requests": [dict(r) for r in requests]})
+
+
 if __name__ == "__main__":
     init_db()
     print("=" * 60)
@@ -4800,18 +5029,6 @@ if __name__ == "__main__":
             print(f"  Proxy Protocol v{proxy_version} (HTTP头部) 已启用")
             print()
 
-        from werkzeug.serving import WSGIRequestHandler
-
-        class RealIPLogHandler(WSGIRequestHandler):
-
-            def address_string(self):
-                forwarded = self.headers.get('X-Forwarded-For')
-                if forwarded:
-                    ip = forwarded.split(',')[0].strip()
-                    if is_valid_ip(ip):
-                        return ip
-                return super().address_string()
-
         def run_cleanup_scheduler():
             while True:
                 try:
@@ -4824,5 +5041,18 @@ if __name__ == "__main__":
             target=run_cleanup_scheduler, daemon=True)
         cleanup_thread.start()
 
-        app.run(host=CFG['app']['host'], port=CFG['app']['port'],
-                debug=False, threaded=True, request_handler=RealIPLogHandler)
+        import werkzeug.serving
+        original_address_string = werkzeug.serving.WSGIRequestHandler.address_string
+
+        def patched_address_string(self):
+            forwarded = self.headers.get('X-Forwarded-For')
+            if forwarded:
+                ip = forwarded.split(',')[0].strip()
+                if is_valid_ip(ip):
+                    return ip
+            return original_address_string(self)
+
+        werkzeug.serving.WSGIRequestHandler.address_string = patched_address_string
+
+        socketio.run(app, host=CFG['app']['host'], port=CFG['app']['port'],
+                     debug=False, allow_unsafe_werkzeug=True)

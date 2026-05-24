@@ -77,6 +77,23 @@ export interface AdminTask {
   completed_at: string | null
 }
 
+export interface BatchRequest {
+  id: number
+  user_id: number
+  username: string
+  job_id: string
+  model: string
+  prompt: string
+  prompt_tokens: number
+  status: 'queued' | 'processing' | 'completed' | 'failed'
+  result: string | null
+  result_tokens: number
+  error: string | null
+  xfyun_batch_id: string | null
+  created_at: string
+  updated_at: string
+}
+
 export interface CalculateTokenResult {
   text: string
   tokens: number

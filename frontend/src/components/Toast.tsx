@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useCallback, type ReactNode } from 'react'
 
-type ToastType = 'success' | 'error' | 'info' | 'warning' | 'confirm'
+type ToastType = 'success' | 'error' | 'info' | 'warning' | 'confirm' | 'loading'
 
 interface ToastMessage {
   id: number
@@ -9,16 +9,23 @@ interface ToastMessage {
   onConfirm?: () => void
   onCancel?: () => void
   exiting?: boolean
+  duration?: number
 }
 
 interface ToastContextType {
-  showToast: (message: string, type?: ToastType) => void
+  showToast: (message: string, type?: ToastType, duration?: number) => void
   showConfirm: (message: string, onConfirm: () => void) => void
+  showLoading: (message: string) => number
+  updateLoading: (id: number, message: string, type?: 'success' | 'error' | 'info') => void
+  closeToast: (id: number) => void
 }
 
 const ToastContext = createContext<ToastContextType>({
   showToast: () => {},
   showConfirm: () => {},
+  showLoading: () => 0,
+  updateLoading: () => {},
+  closeToast: () => {},
 })
 
 export function useToast() {
@@ -35,12 +42,16 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     }, 300)
   }, [])
 
-  const showToast = useCallback((message: string, type: ToastType = 'info') => {
+  const showToast = useCallback((message: string, type: ToastType = 'info', duration?: number) => {
     const id = Date.now()
-    setToasts(prev => [...prev, { id, type, message }])
-    setTimeout(() => {
-      closeToast(id)
-    }, 3000)
+    setToasts(prev => [...prev, { id, type, message, duration }])
+    if (type !== 'loading' && type !== 'confirm') {
+      const timeout = duration || 3000
+      setTimeout(() => {
+        closeToast(id)
+      }, timeout)
+    }
+    return id
   }, [closeToast])
 
   const showConfirm = useCallback((message: string, onConfirm: () => void) => {
@@ -48,10 +59,21 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     setToasts(prev => [...prev, { id, type: 'confirm', message, onConfirm }])
   }, [])
 
+  const showLoading = useCallback((message: string) => {
+    const id = Date.now()
+    setToasts(prev => [...prev, { id, type: 'loading', message }])
+    return id
+  }, [])
 
+  const updateLoading = useCallback((id: number, message: string, type: 'success' | 'error' | 'info' = 'success') => {
+    setToasts(prev => prev.map(t => t.id === id ? { ...t, message, type } : t))
+    setTimeout(() => {
+      closeToast(id)
+    }, 2000)
+  }, [closeToast])
 
   return (
-    <ToastContext.Provider value={{ showToast, showConfirm }}>
+    <ToastContext.Provider value={{ showToast, showConfirm, showLoading, updateLoading, closeToast }}>
       {children}
       {toasts.length > 0 && (
         <div className="toast-container">
@@ -63,6 +85,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
                 {toast.type === 'info' && 'ℹ'}
                 {toast.type === 'warning' && '⚠'}
                 {toast.type === 'confirm' && '?'}
+                {toast.type === 'loading' && '◐'}
               </div>
               <div className="toast-message">{toast.message}</div>
               {toast.type === 'confirm' ? (
@@ -82,7 +105,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
                     取消
                   </button>
                 </div>
-              ) : (
+              ) : toast.type !== 'loading' && (
                 <button className="toast-close" onClick={() => closeToast(toast.id)}>✕</button>
               )}
             </div>

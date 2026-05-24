@@ -1,6 +1,6 @@
 import type {
   User, LoginResponse, RegisterResponse, TokenConfig, TokenStats,
-  AdminUser, AdminTask, UsageStats, CalculateTokenResult, UsageHistory,
+  AdminUser, AdminTask, BatchRequest, UsageStats, CalculateTokenResult, UsageHistory,
   Space, ContextMessage, ContextSettings, Notification,
   IPBan, IPTracking, AuditLogEntry
 } from '../types/api'
@@ -183,6 +183,22 @@ export const adminApi = {
 
   cleanupTasks: () =>
     request<{ message: string }>('/api/admin/tasks/cleanup', { method: 'POST' }),
+
+  getBatchRequests: (params?: { limit?: number; status?: string; user?: string }) => {
+    const query = new URLSearchParams()
+    if (params?.limit) query.set('limit', String(params.limit))
+    if (params?.status) query.set('status', params.status)
+    if (params?.user) query.set('user', params.user)
+    const qs = query.toString()
+    return request<{ requests: BatchRequest[] }>(
+      `/api/admin/batch-requests${qs ? `?${qs}` : ''}`)
+  },
+
+  getBatchRequest: (requestId: number) =>
+    request<{ request: BatchRequest }>(`/api/admin/batch-requests/${requestId}`),
+
+  cleanupBatchRequests: (days: number = 7) =>
+    request<{ message: string }>(`/api/admin/batch-requests/cleanup?days=${days}`, { method: 'POST' }),
 
   sendNotification: (data: {
     subject: string; body: string; type: string;
