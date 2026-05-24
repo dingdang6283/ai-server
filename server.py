@@ -1208,14 +1208,6 @@ def validate_user_status(user: Dict):
 
 def deduct_tokens(user_id: int, tokens: int, space_id: int = None) -> dict:
     conn = get_db()
-    conn.execute(
-        "UPDATE users SET remaining_tokens = MAX(remaining_tokens - ?, 0), "
-        "updated_at = datetime('now') WHERE id = ?",
-        (tokens, user_id))
-    remaining = conn.execute(
-        "SELECT remaining_tokens FROM users WHERE id = ?",
-        (user_id,)).fetchone()['remaining_tokens']
-    space_remaining = 0
     if space_id:
         conn.execute(
             "UPDATE user_spaces SET tokens = MAX(tokens - ?, 0), "
@@ -1225,6 +1217,18 @@ def deduct_tokens(user_id: int, tokens: int, space_id: int = None) -> dict:
             "SELECT tokens FROM user_spaces WHERE id = ?",
             (space_id,)).fetchone()
         space_remaining = space['tokens'] if space else 0
+        remaining = conn.execute(
+            "SELECT remaining_tokens FROM users WHERE id = ?",
+            (user_id,)).fetchone()['remaining_tokens']
+    else:
+        conn.execute(
+            "UPDATE users SET remaining_tokens = MAX(remaining_tokens - ?, 0), "
+            "updated_at = datetime('now') WHERE id = ?",
+            (tokens, user_id))
+        remaining = conn.execute(
+            "SELECT remaining_tokens FROM users WHERE id = ?",
+            (user_id,)).fetchone()['remaining_tokens']
+        space_remaining = 0
     conn.commit()
     conn.close()
     return {"remaining_tokens": remaining, "space_tokens": space_remaining}
@@ -4821,13 +4825,15 @@ def chat_completions():
 
             logger.info(f"AI回答完成: request_id={request_id}, answer_preview={answer_text[:100]}...")
             warnings = []
-            if remaining_tokens <= 10:
+            if remaining_tokens <= 10 and remaining_tokens > 0:
                 warnings.append(f"Token即将用完，剩余仅{remaining_tokens}")
             if remaining_tokens <= 0:
-                answer_text += "\n\n[Token已用完，输出已被截断，请及时补充Token]"
                 warnings.append("Token已用完，后续请求将被拒绝")
-            if user['remaining_tokens'] - total_deduct <= 0 and total_deduct > 0:
-                warnings.append("本次请求已消耗全部剩余Token")
+            if remaining_tokens <= 0 and total_deduct > 0:
+                if space_id:
+                    warnings.append("本次请求已消耗全部剩余空间Token")
+                else:
+                    warnings.append("本次请求已消耗全部剩余Token")
 
             chat_response = {
                 "id": response_id,
