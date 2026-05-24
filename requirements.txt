@@ -1,0 +1,25 @@
+# ============================================================
+# DingDing AI Cloud - 依赖清单
+# ============================================================
+# 安装方法：pip install -r requirements.txt
+# ============================================================
+
+# ---- 核心框架 ----
+Flask>=3.0
+Werkzeug>=3.0
+Jinja2>=3.0
+
+# ---- 配置解析 ----
+PyYAML>=6.0
+
+# ---- HTTP 客户端 ----
+requests>=2.31
+
+# ---- 图片验证码 ----
+pillow>=10.0
+
+# ---- 数据库驱动（可选，按需安装） ----
+# SQLite：Python 内置，无需额外安装
+# MySQL：pip install pymysql
+# PostgreSQL：pip install psycopg2-binary
+# MongoDB：pip install pymongo

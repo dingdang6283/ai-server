@@ -1,29 +1,117 @@
+# ============================================================
+# DingDing AI Cloud - 主配置文件
+# ============================================================
+# 所有配置项支持通过同名环境变量覆盖（前缀 YML_），例如：
+#   YML_SMTP_PASSWORD=xxx python3 server.py
+# ============================================================
 
 
+# ==================== 应用基础配置 ====================
 app:
-  secret_key: "dingdang-cloud-secret-key-2026"
+  # Flask 签名密钥 — 用于 Session、Token 等加密
+  secret_key: ""
+  # 监听地址（0.0.0.0 允许所有来源，127.0.0.1 仅本地）
   host: "127.0.0.1"
+  # 监听端口
   port: 8081
-  # 代理协议版本: 0=不使用, 1=解析HTTP头部(X-Forwarded-For/X-Real-IP), 2=解析socket级Proxy Protocol v2
+  # 代理协议版本：
+  #   0 = 不使用
+  #   1 = 解析 HTTP 头部（X-Forwarded-For / X-Real-IP）
+  #   2 = 解析 Socket 级 Proxy Protocol v2
   proxy_protocol_version: 1
-  # 企业邮箱白名单（逗号分隔的域名列表，为空则不限制）
-  # 环境变量: YML_EMAIL_WHITELIST=company.com,example.org
+  # 企业邮箱域名白名单（逗号分隔，为空则不限制）
+  # 例：example.com,company.org
   email_whitelist: ""
 
+
+# ==================== SMTP 邮件服务 ====================
 smtp:
+  # 发件人显示名称
   display_name: "aicloud"
-  sender_email: "abc3797534@qq.com"
-  username: "abc3797534"
-  password: "qjaweeyzedjlccaa"
-  server: "smtp.qq.com"
+  # 发件邮箱地址
+  sender_email: ""
+  # SMTP 登录用户名（通常与发件邮箱相同）
+  username: ""
+  # SMTP 密码或授权码
+  password: ""
+  # SMTP 服务器地址
+  server: ""
+  # SMTP 端口
   port: 465
+  # 加密方式（SSL / TLS）
   encryption: "SSL"
 
-api:
-  xfyun_password: "ecaf4f60aad5b1f52ff1900eaef9daca:YTJlYjhmZWZkNGU5NjFjZjVjY2RiNGZi"
 
+# ==================== 邮件模板路径 ====================
+email_templates:
+  # 验证码模板文件路径（支持绝对路径或相对项目根目录的相对路径）
+  verification: "email.html"
+  # 通知公告模板文件路径
+  notification: "notification.html"
+  # Token 授权模板文件路径
+  token_grant: "token_grant.html"
+
+
+# ==================== API 密钥配置 ====================
+api:
+  # 讯飞星火 API Key（格式：password:api_key）
+  xfyun_password: ""
+
+
+# ==================== 前端配置 ====================
 frontend:
-  api_host: "cloud.ai-dingdang.fucku.top"
-  api_protocol: "https"
-  site_title: "ai平台"
+  # API 地址（用于前端构建后 API 调用示例展示）
+  api_host: "127.0.0.1"
+  # API 协议（http / https）
+  api_protocol: "http"
+  # 网站标题（浏览器标签页标题）
   page_title: "DingDang Cloud"
+  # 页面内的站点名称
+  site_title: "ai平台"
+
+
+# ==================== 数据库配置 ====================
+# 支持 SQLite / MySQL / PostgreSQL / MongoDB 四种模式
+database:
+  # 数据库模式：sqlite / mysql / postgresql / mongodb
+  # 切换模式后请确保对应模块已安装（见 requirements.txt）
+  mode: "sqlite"
+
+  # -------- SQLite 配置（mode = sqlite 时生效） --------
+  sqlite:
+    # 数据库文件名（存储在 database.path 目录下）
+    filename: "data.db"
+    # 自动创建数据库（首次启动时）
+    auto_create: true
+
+  # -------- MySQL 配置（mode = mysql 时生效） --------
+  mysql:
+    host: "127.0.0.1"
+    port: 3306
+    user: "root"
+    password: ""
+    database: "dingdang_cloud"
+    # 连接池大小
+    pool_size: 10
+
+  # -------- PostgreSQL 配置（mode = postgresql 时生效） --------
+  postgresql:
+    host: "127.0.0.1"
+    port: 5432
+    user: "postgres"
+    password: ""
+    database: "dingdang_cloud"
+    pool_size: 10
+
+  # -------- MongoDB 配置（mode = mongodb 时生效） --------
+  mongodb:
+    host: "127.0.0.1"
+    port: 27017
+    user: ""
+    password: ""
+    database: "dingdang_cloud"
+    # 连接 URI（非空时优先于 host/port/user/password 的组合）
+    uri: ""
+
+  # -------- 通用路径配置 --------
+  path: "."

@@ -37,52 +37,93 @@ npm install
 
 #### 1. 后端配置 `config.yml`
 
+完整配置参考 [config.yml](config.yml)，主要配置段如下：
+
 ```yaml
+# ---- 应用基础 ----
 app:
-  secret_key: "your-secret-key"        # Flask 密钥
-  host: "127.0.0.1"                    # 监听地址
-  port: 8081                           # 监听端口
-  proxy_protocol_version: 1            # 代理协议 (0=关闭, 1=HTTP头, 2=PPv2)
-  email_whitelist: ""                  # 邮箱域名白名单，逗号分隔
+  secret_key: "your-secret-key"          # Flask 密钥
+  host: "127.0.0.1"                      # 监听地址
+  port: 8081                             # 监听端口
+  proxy_protocol_version: 1              # 代理协议 (0=关闭, 1=HTTP头, 2=PPv2)
+  email_whitelist: ""                    # 邮箱域名白名单，逗号分隔
 
+# ---- 邮件服务 ----
 smtp:
-  display_name: "aicloud"              # 发件人显示名称
-  sender_email: "your@email.com"       # 发件邮箱
-  username: "your@email.com"           # SMTP 用户名
-  password: "your-smtp-password"       # SMTP 密码/授权码
-  server: "smtp.example.com"           # SMTP 服务器
-  port: 465                            # SMTP 端口
-  encryption: "SSL"                    # 加密方式 (SSL/TLS)
+  display_name: "aicloud"                # 发件人显示名称
+  sender_email: "your@email.com"         # 发件邮箱
+  username: "your@email.com"             # SMTP 用户名
+  password: "your-smtp-password"         # SMTP 密码/授权码
+  server: "smtp.example.com"             # SMTP 服务器
+  port: 465                              # SMTP 端口
+  encryption: "SSL"                      # 加密方式
 
+# ---- API 密钥 ----
 api:
-  xfyun_password: "your-xfyun-key"     # 讯飞星火 API Key
+  xfyun_password: "your-xfyun-key"       # 讯飞星火 API Key
+
+# ---- 邮件模板 ----
+email_templates:
+  verification: "email.html"             # 验证码模板
+  notification: "notification.html"      # 通知模板
+  token_grant: "token_grant.html"        # Token 授权模板
+
+# ---- 前端 ----
+frontend:
+  api_host: "127.0.0.1"                 # API 地址（示例用）
+  api_protocol: "http"                   # API 协议
+  page_title: "DingDang Cloud"          # 浏览器标签页标题
+  site_title: "ai平台"                   # 页面站点名称
+
+# ---- 数据库 ----
+database:
+  mode: "sqlite"                         # 模式：sqlite / mysql / postgresql / mongodb
+  path: "."                              # SQLite 文件存储目录
+  sqlite:
+    filename: "data.db"                  # SQLite 文件名
+    auto_create: true                    # 首次启动自动创建
+  mysql:
+    host: "127.0.0.1"
+    port: 3306
+    user: "root"
+    password: ""
+    database: "dingdang_cloud"
+  postgresql:
+    host: "127.0.0.1"
+    port: 5432
+    user: "postgres"
+    password: ""
+    database: "dingdang_cloud"
+  mongodb:
+    host: "127.0.0.1"
+    port: 27017
+    user: ""
+    password: ""
+    database: "dingdang_cloud"
+    uri: ""
 ```
 
-所有字段也支持通过环境变量覆盖（如 `YML_SMTP_PASSWORD` 等）。
-
-#### 2. 前端配置 `frontend/.env`
-
-```env
-VITE_API_HOST=localhost      # API 地址（开发环境）
-VITE_API_PROTOCOL=http       # API 协议
+所有配置项支持通过同名环境变量覆盖（前缀 `YML_`），例如：
+```bash
+YML_SMTP_PASSWORD=xxx YML_XFYUN_PASSWORD=xxx python3 server.py
 ```
 
-生产环境配置 `frontend/.env.production`：
+#### 2. 前端配置（已合并至 config.yml）
 
-```env
-API_HOST=your-domain.com     # API 地址（生产环境）
-API_PROTOCOL=https           # API 协议
-```
-
-> 前端连接的后端地址优先级：`.env.production` > `.env` > `vite.config.ts` 中的默认值。
+前端地址配置已合并到 `config.yml` 的 `frontend` 段，配置注入由后端自动完成。
+不再需要独立的 `.env` 文件。
 
 ### 运行
 
 ```bash
-# 后端
+# 安装依赖
+pip install -r requirements.txt
+cd frontend && npm install
+
+# 启动后端
 python3 server.py
 
-# 前端开发模式（可选）
+# 启动前端开发模式（可选）
 cd frontend && npx vite --host 0.0.0.0 --port 5173
 ```
 

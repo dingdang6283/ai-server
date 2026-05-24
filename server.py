@@ -68,6 +68,37 @@ def load_config():
     cfg.setdefault('api', {})
     cfg['api']['xfyun_password'] = os.environ.get('YML_XFYUN_PASSWORD',
         cfg['api'].get('xfyun_password', ''))
+    cfg.setdefault('email_templates', {})
+    cfg['email_templates']['verification'] = cfg['email_templates'].get('verification', 'email.html')
+    cfg['email_templates']['notification'] = cfg['email_templates'].get('notification', 'notification.html')
+    cfg['email_templates']['token_grant'] = cfg['email_templates'].get('token_grant', 'token_grant.html')
+    cfg.setdefault('database', {})
+    cfg['database']['mode'] = cfg['database'].get('mode', 'sqlite')
+    cfg['database']['path'] = cfg['database'].get('path', '.')
+    cfg['database'].setdefault('sqlite', {})
+    cfg['database']['sqlite']['filename'] = cfg['database']['sqlite'].get('filename', 'data.db')
+    cfg['database']['sqlite']['auto_create'] = cfg['database']['sqlite'].get('auto_create', True)
+    cfg['database'].setdefault('mysql', {})
+    cfg['database']['mysql']['host'] = cfg['database']['mysql'].get('host', '127.0.0.1')
+    cfg['database']['mysql']['port'] = int(cfg['database']['mysql'].get('port', 3306))
+    cfg['database']['mysql']['user'] = cfg['database']['mysql'].get('user', 'root')
+    cfg['database']['mysql']['password'] = cfg['database']['mysql'].get('password', '')
+    cfg['database']['mysql']['database'] = cfg['database']['mysql'].get('database', 'dingdang_cloud')
+    cfg['database']['mysql']['pool_size'] = int(cfg['database']['mysql'].get('pool_size', 10))
+    cfg['database'].setdefault('postgresql', {})
+    cfg['database']['postgresql']['host'] = cfg['database']['postgresql'].get('host', '127.0.0.1')
+    cfg['database']['postgresql']['port'] = int(cfg['database']['postgresql'].get('port', 5432))
+    cfg['database']['postgresql']['user'] = cfg['database']['postgresql'].get('user', 'postgres')
+    cfg['database']['postgresql']['password'] = cfg['database']['postgresql'].get('password', '')
+    cfg['database']['postgresql']['database'] = cfg['database']['postgresql'].get('database', 'dingdang_cloud')
+    cfg['database']['postgresql']['pool_size'] = int(cfg['database']['postgresql'].get('pool_size', 10))
+    cfg['database'].setdefault('mongodb', {})
+    cfg['database']['mongodb']['host'] = cfg['database']['mongodb'].get('host', '127.0.0.1')
+    cfg['database']['mongodb']['port'] = int(cfg['database']['mongodb'].get('port', 27017))
+    cfg['database']['mongodb']['user'] = cfg['database']['mongodb'].get('user', '')
+    cfg['database']['mongodb']['password'] = cfg['database']['mongodb'].get('password', '')
+    cfg['database']['mongodb']['database'] = cfg['database']['mongodb'].get('database', 'dingdang_cloud')
+    cfg['database']['mongodb']['uri'] = cfg['database']['mongodb'].get('uri', '')
     cfg.setdefault('tdengine', {})
     cfg['tdengine']['host'] = os.environ.get('YML_TDENGINE_HOST',
         cfg['tdengine'].get('host', '127.0.0.1'))
@@ -77,6 +108,11 @@ def load_config():
         cfg['tdengine'].get('password', 'sh1990130'))
     cfg['tdengine']['user'] = os.environ.get('YML_TDENGINE_USER',
         cfg['tdengine'].get('user', 'root'))
+    cfg.setdefault('frontend', {})
+    cfg['frontend']['api_host'] = cfg['frontend'].get('api_host', '127.0.0.1')
+    cfg['frontend']['api_protocol'] = cfg['frontend'].get('api_protocol', 'http')
+    cfg['frontend']['site_title'] = cfg['frontend'].get('site_title', 'ai平台')
+    cfg['frontend']['page_title'] = cfg['frontend'].get('page_title', 'DingDang Cloud')
     return cfg
 
 CFG = load_config()
@@ -87,9 +123,14 @@ app.config['JSONIFY_MIMETYPE'] = 'application/json; charset=utf-8'
 app.config['SECRET_KEY'] = CFG['app']['secret_key']
 app.config['TOKEN_SERIALIZER'] = URLSafeTimedSerializer(app.config['SECRET_KEY'])
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data.db')
-FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-    'frontend', 'dist')
+base_dir = os.path.dirname(os.path.abspath(__file__))
+db_cfg = CFG['database']
+if db_cfg['mode'] == 'sqlite':
+    db_path = os.path.join(base_dir, db_cfg['path'], db_cfg['sqlite']['filename'])
+else:
+    db_path = os.path.join(base_dir, 'data.db')
+DB_PATH = os.path.abspath(db_path)
+FRONTEND_DIST = os.path.join(base_dir, 'frontend', 'dist')
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1118,7 +1159,8 @@ def send_verification_email(to_email: str, code: str,
             'DingDang Cloud - 验证码')
 
         email_template_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), 'email.html')
+            os.path.dirname(os.path.abspath(__file__)),
+            CFG['email_templates']['verification'])
         if os.path.exists(email_template_path):
             with open(email_template_path, 'r', encoding='utf-8') as f:
                 html_body = f.read().replace('{{CODE}}', code)
@@ -2529,8 +2571,8 @@ def send_notification_email(to_email: str, subject: str, body: str,
                             token_amount: int = 0) -> bool:
     try:
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        template_name = 'token_grant.html' if ntype == 'token_grant' else 'notification.html'
-        template_path = os.path.join(base_dir, template_name)
+        template_key = 'token_grant' if ntype == 'token_grant' else 'notification'
+        template_path = os.path.join(base_dir, CFG['email_templates'][template_key])
 
         if os.path.exists(template_path):
             with open(template_path, 'r', encoding='utf-8') as f:
@@ -3742,10 +3784,10 @@ ADAPTER = XunfeiBatchAdapter(API_PASSWORD) if API_PASSWORD else None
 
 # frontend config
 FRONTEND_CONFIG = {
-    'api_host': CFG.get('frontend', {}).get('api_host', '127.0.0.1'),
-    'api_protocol': CFG.get('frontend', {}).get('api_protocol', 'http'),
-    'site_title': CFG.get('frontend', {}).get('site_title', 'ai平台'),
-    'page_title': CFG.get('frontend', {}).get('page_title', 'DingDang Cloud'),
+    'api_host': CFG['frontend']['api_host'],
+    'api_protocol': CFG['frontend']['api_protocol'],
+    'site_title': CFG['frontend']['site_title'],
+    'page_title': CFG['frontend']['page_title'],
 }
 
 
