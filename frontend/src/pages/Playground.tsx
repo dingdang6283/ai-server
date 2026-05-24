@@ -25,7 +25,17 @@ const ENDPOINTS: Endpoint[] = [
     label: 'AI聊天 - /v1/chat/completions', requiresAuth: true,
     defaultBody: JSON.stringify({
       messages: [{ role: 'user', content: '你好，请介绍一下你自己' }],
-      max_tokens: 500, temperature: 0.7, stream: false
+      room_id: '1', max_tokens: 500, temperature: 0.7,
+      web_search: false, deep_think: false, stream: false
+    }, null, 2)
+  },
+  {
+    method: 'POST', path: '/v1/completions',
+    label: 'AI补全 - /v1/completions', requiresAuth: true,
+    defaultBody: JSON.stringify({
+      prompt: '你好，请介绍一下你自己',
+      room_id: '1', max_tokens: 500, temperature: 0.7,
+      web_search: false, deep_think: false
     }, null, 2)
   },
   {
@@ -43,22 +53,6 @@ const ENDPOINTS: Endpoint[] = [
     defaultBody: '{}'
   },
   {
-    method: 'POST', path: '/v1/batch/jobs',
-    label: '异步批处理 - /v1/batch/jobs (提交)', requiresAuth: true,
-    defaultBody: JSON.stringify({
-      messages: [{ role: 'user', content: '批量处理测试' }],
-      model: 'qwen', max_tokens: 500, temperature: 0.7
-    }, null, 2)
-  },
-  {
-    method: 'GET', path: '/v1/batch/jobs',
-    label: '批处理任务列表 - /v1/batch/jobs', requiresAuth: true
-  },
-  {
-    method: 'GET', path: '/v1/batch/jobs/job_xxx',
-    label: '任务状态查询 - /v1/batch/jobs/{id}', requiresAuth: true
-  },
-  {
     method: 'PUT', path: '/api/admin/token-config',
     label: '修改Token配置 - /api/admin/token-config', requiresAuth: true,
     adminOnly: true,
@@ -67,29 +61,9 @@ const ENDPOINTS: Endpoint[] = [
     }, null, 2)
   },
   {
-    method: 'GET', path: '/v1/batch/files',
-    label: '[管理] 文件列表 - /v1/batch/files', requiresAuth: true,
+    method: 'GET', path: '/api/admin/ai-requests',
+    label: '[管理] AI请求列表 - /api/admin/ai-requests', requiresAuth: true,
     adminOnly: true
-  },
-  {
-    method: 'GET', path: '/v1/batch/batches',
-    label: '[管理] 批次列表 - /v1/batch/batches', requiresAuth: true,
-    adminOnly: true
-  },
-  {
-    method: 'POST', path: '/v1/batch/upload',
-    label: '[管理] 上传批处理 - /v1/batch/upload', requiresAuth: true,
-    adminOnly: true,
-    defaultBody: JSON.stringify({
-      requests: [{
-        custom_id: 'req-1', method: 'POST',
-        url: '/v1/chat/completions',
-        body: {
-          model: 'qwen',
-          messages: [{ role: 'user', content: '测试请求1' }]
-        }
-      }]
-    }, null, 2)
   }
 ]
 
@@ -182,7 +156,7 @@ export default function Playground() {
 
     const startTime = performance.now()
 
-    if (useStream && path === '/v1/chat/completions') {
+    if (useStream && (path === '/v1/chat/completions' || path === '/v1/completions')) {
       const controller = new AbortController()
       streamAbortRef.current = controller
       try {
@@ -268,7 +242,7 @@ export default function Playground() {
       const fetchOptions: RequestInit = { method, headers }
 
       if (method !== 'GET' && requestBody.trim()) {
-        if (path === '/v1/chat/completions') {
+        if (path === '/v1/chat/completions' || path === '/v1/completions') {
           try {
             const parsed = JSON.parse(requestBody)
             parsed.room_id = roomId
@@ -431,7 +405,7 @@ export default function Playground() {
                   style={{ fontFamily: 'monospace', fontSize: '0.75rem',
                     resize: 'vertical', lineHeight: 1.5 }} />
                 {/* Room ID for chat sessions: used to isolate context, defaults to "1" */}
-                {path === '/v1/chat/completions' && (
+                {(path === '/v1/chat/completions' || path === '/v1/completions') && (
                   <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', alignItems: 'center' }}>
                     <input className="input" type="text" placeholder="room_id 用于隔离上下文，支持 UTF-8"
                       value={roomId} onChange={e => setRoomId(e.target.value)}
@@ -460,6 +434,32 @@ export default function Playground() {
                     }}
                     style={{ accentColor: 'var(--primary-500)' }} />
                   <span>流式响应 (SSE)</span>
+                </label>
+                <label className="label" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                  <input type="checkbox" id="webSearchToggle"
+                    onChange={e => {
+                      const checked = e.target.checked
+                      try {
+                        const parsed = JSON.parse(requestBody)
+                        parsed.web_search = checked
+                        setRequestBody(JSON.stringify(parsed, null, 2))
+                      } catch {}
+                    }}
+                    style={{ accentColor: 'var(--primary-500)' }} />
+                  <span>🌐 联网搜索 <span style={{ color: 'var(--warning)', fontSize: '0.7rem' }}>(+20 token)</span></span>
+                </label>
+                <label className="label" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                  <input type="checkbox" id="deepThinkToggle"
+                    onChange={e => {
+                      const checked = e.target.checked
+                      try {
+                        const parsed = JSON.parse(requestBody)
+                        parsed.deep_think = checked
+                        setRequestBody(JSON.stringify(parsed, null, 2))
+                      } catch {}
+                    }}
+                    style={{ accentColor: 'var(--primary-500)' }} />
+                  <span>🧠 深度思考 <span style={{ color: 'var(--warning)', fontSize: '0.7rem' }}>(+1 token)</span></span>
                 </label>
                 {isLoading && streamAbortRef.current && (
                   <button type="button" className="btn btn-danger btn-sm"

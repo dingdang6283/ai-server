@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useCallback, type ReactNode } from 'react'
+import AlertModal from './AlertModal'
 
 type ToastType = 'success' | 'error' | 'info' | 'warning' | 'confirm' | 'loading'
 
@@ -9,6 +10,12 @@ interface ToastMessage {
   onConfirm?: () => void
   onCancel?: () => void
   exiting?: boolean
+  duration?: number
+}
+
+interface AlertState {
+  type: 'success' | 'error' | 'info' | 'warning'
+  message: string
   duration?: number
 }
 
@@ -34,6 +41,7 @@ export function useToast() {
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<ToastMessage[]>([])
+  const [alertState, setAlertState] = useState<AlertState | null>(null)
 
   const closeToast = useCallback((id: number) => {
     setToasts(prev => prev.map(t => t.id === id ? { ...t, exiting: true } : t))
@@ -43,16 +51,13 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const showToast = useCallback((message: string, type: ToastType = 'info', duration?: number) => {
-    const id = Date.now()
-    setToasts(prev => [...prev, { id, type, message, duration }])
-    if (type !== 'loading' && type !== 'confirm') {
-      const timeout = duration || 3000
-      setTimeout(() => {
-        closeToast(id)
-      }, timeout)
+    if (type === 'loading' || type === 'confirm') {
+      const id = Date.now()
+      setToasts(prev => [...prev, { id, type, message, duration }])
+      return id
     }
-    return id
-  }, [closeToast])
+    setAlertState({ type, message, duration })
+  }, [])
 
   const showConfirm = useCallback((message: string, onConfirm: () => void) => {
     const id = Date.now()
@@ -72,9 +77,21 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     }, 2000)
   }, [closeToast])
 
+  const closeAlert = useCallback(() => {
+    setAlertState(null)
+  }, [])
+
   return (
     <ToastContext.Provider value={{ showToast, showConfirm, showLoading, updateLoading, closeToast }}>
       {children}
+      {alertState && (
+        <AlertModal
+          type={alertState.type}
+          message={alertState.message}
+          duration={alertState.duration}
+          onClose={closeAlert}
+        />
+      )}
       {toasts.length > 0 && (
         <div className="toast-container">
           {toasts.map(toast => (

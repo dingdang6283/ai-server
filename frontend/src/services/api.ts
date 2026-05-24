@@ -307,14 +307,17 @@ export const aiApi = {
       { method: 'POST', body: JSON.stringify({ text }) }),
 
   chatCompletions: (messages: Array<{ role: string; content: string }>,
-    maxTokens: number = 500, spaceId?: number, roomId?: string) =>
+    maxTokens: number = 500, spaceId?: number, roomId?: string,
+    webSearch?: boolean, deepThink?: boolean) =>
     request<any>('/v1/chat/completions',
       { method: 'POST',
         body: JSON.stringify({
           messages,
           max_tokens: maxTokens,
           ...(spaceId !== undefined ? { space_id: spaceId } : {}),
-          ...(roomId ? { room_id: roomId } : {})
+          ...(roomId ? { room_id: roomId } : {}),
+          ...(webSearch !== undefined ? { web_search: webSearch } : {}),
+          ...(deepThink !== undefined ? { deep_think: deepThink } : {})
         }) }),
 
   submitBatchJob: (messages: Array<{ role: string; content: string }>,

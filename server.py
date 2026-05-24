@@ -1,6 +1,8 @@
 """
-DingDang Cloud - 讯飞星火批处理API -> 千问(Qwen) API 格式适配器
+DingDang Cloud - AI API 适配器（重构版）
 + 用户管理系统（邮箱验证、API Key、管理员Token配置）
++ AI请求核心流程（token计算、数据库存储、状态管理、AI交互）
++ 联网搜索功能（每次消耗20token）+ 深度思考功能（额外+1token）
 """
 
 from flask import Flask, request, Response, send_from_directory
@@ -405,54 +407,42 @@ def init_db():
         );
     ''')
     conn.execute('''
-        CREATE TABLE IF NOT EXISTS admin_tasks (
+        CREATE TABLE IF NOT EXISTS ai_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            description TEXT DEFAULT '',
-            status TEXT DEFAULT 'pending' CHECK(status IN ('pending','in_progress','completed','failed','canceled')),
-            priority INTEGER DEFAULT 2,
-            created_by INTEGER,
-            assigned_to INTEGER,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now')),
-            completed_at TEXT,
-            FOREIGN KEY (created_by) REFERENCES users(id),
-            FOREIGN KEY (assigned_to) REFERENCES users(id)
-        )
-    ''')
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS batch_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_id TEXT NOT NULL UNIQUE,
             user_id INTEGER NOT NULL,
-            username TEXT NOT NULL,
-            job_id TEXT NOT NULL UNIQUE,
-            model TEXT DEFAULT 'qwen',
-            prompt TEXT DEFAULT '',
-            prompt_tokens INTEGER DEFAULT 0,
-            status TEXT DEFAULT 'queued' CHECK(status IN ('queued','processing','completed','failed')),
-            result TEXT,
-            result_tokens INTEGER DEFAULT 0,
+            username TEXT NOT NULL DEFAULT '',
+            room_id TEXT DEFAULT '1',
+            question TEXT NOT NULL,
+            question_tokens INTEGER DEFAULT 0,
+            web_search INTEGER DEFAULT 0,
+            deep_think INTEGER DEFAULT 0,
+            total_tokens INTEGER DEFAULT 0,
+            request_json TEXT,
+            status TEXT DEFAULT 'pending' CHECK(status IN ('pending','processing','completed','failed')),
+            answer TEXT,
             error TEXT,
-            xfyun_batch_id TEXT,
             created_at TEXT DEFAULT (datetime('now')),
             updated_at TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     ''')
     conn.execute('''
-        CREATE INDEX IF NOT EXISTS idx_batch_requests_created
-        ON batch_requests(created_at)
+        CREATE INDEX IF NOT EXISTS idx_ai_requests_created
+        ON ai_requests(created_at)
     ''')
     conn.execute('''
-        CREATE INDEX IF NOT EXISTS idx_batch_requests_user
-        ON batch_requests(user_id)
+        CREATE INDEX IF NOT EXISTS idx_ai_requests_user
+        ON ai_requests(user_id)
     ''')
     conn.execute('''
-        CREATE INDEX IF NOT EXISTS idx_admin_tasks_created
-        ON admin_tasks(created_at)
+        CREATE INDEX IF NOT EXISTS idx_ai_requests_request_id
+        ON ai_requests(request_id)
     ''')
-    # 清理7天前的已完成/取消任务
-    conn.execute("DELETE FROM admin_tasks WHERE created_at < datetime('now', '-7 days') AND status IN ('completed','canceled')")
+    conn.execute('''
+        CREATE INDEX IF NOT EXISTS idx_ai_requests_status
+        ON ai_requests(status)
+    ''')
     conn.commit()
 
     for col in ['remaining_tokens', 'max_concurrent', 'priority',
@@ -561,6 +551,58 @@ def init_db():
             first_seen TEXT DEFAULT (datetime('now')),
             last_seen TEXT DEFAULT (datetime('now')),
             UNIQUE(ip_address, endpoint)
+        )
+    ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS admin_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending','in_progress','completed','failed','canceled')),
+            priority INTEGER DEFAULT 2,
+            created_by INTEGER,
+            assigned_to INTEGER,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            completed_at TEXT,
+            FOREIGN KEY (created_by) REFERENCES users(id),
+            FOREIGN KEY (assigned_to) REFERENCES users(id)
+        )
+    ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS batch_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            username TEXT NOT NULL DEFAULT '',
+            job_id TEXT NOT NULL,
+            model TEXT NOT NULL DEFAULT '',
+            prompt TEXT DEFAULT '',
+            prompt_tokens INTEGER DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'queued'
+                CHECK(status IN ('queued','processing','completed','failed')),
+            result TEXT,
+            result_tokens INTEGER DEFAULT 0,
+            error TEXT,
+            xfyun_batch_id TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS claim_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token TEXT NOT NULL UNIQUE,
+            user_id INTEGER NOT NULL,
+            notification_id INTEGER NOT NULL,
+            token_amount INTEGER NOT NULL DEFAULT 0,
+            expires_at TEXT NOT NULL,
+            claimed INTEGER NOT NULL DEFAULT 0,
+            claimed_at TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            FOREIGN KEY (notification_id) REFERENCES admin_notifications(id)
         )
     ''')
     conn.commit()
@@ -1143,7 +1185,7 @@ def authenticate_request() -> Optional[Dict]:
                 (payload['uid'],)).fetchone()
             conn.close()
             if user:
-                return user
+                return dict(user)
     if auth_header.startswith('Bearer '):
         token = auth_header[7:]
         conn = get_db()
@@ -1152,7 +1194,7 @@ def authenticate_request() -> Optional[Dict]:
             (token,)).fetchone()
         conn.close()
         if user:
-            return user
+            return dict(user)
     return None
 
 
@@ -2620,11 +2662,29 @@ def admin_update_user_data():
 
 def send_notification_email(to_email: str, subject: str, body: str,
                             ntype: str = 'announcement',
-                            token_amount: int = 0) -> bool:
+                            token_amount: int = 0,
+                            user_id: int = 0,
+                            notification_id: int = 0) -> bool:
     try:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         template_key = 'token_grant' if ntype == 'token_grant' else 'notification'
         template_path = os.path.join(base_dir, CFG['email_templates'][template_key])
+
+        claim_url = ""
+
+        if ntype == 'token_grant' and user_id and notification_id:
+            claim_token_str = secrets.token_urlsafe(32)
+            expires_at = (datetime.now() + timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S')
+            conn = get_db()
+            conn.execute(
+                "INSERT INTO claim_tokens (token, user_id, notification_id, token_amount, expires_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (claim_token_str, user_id, notification_id, token_amount, expires_at))
+            conn.commit()
+            conn.close()
+            base_url = CFG['frontend'].get('base_url', 'http://localhost:8081')
+            claim_url = f"{base_url}/claim-token/{claim_token_str}"
+            logger.info(f"[Token发放] 已生成领取链接: {claim_url} (有效期至 {expires_at})")
 
         if os.path.exists(template_path):
             with open(template_path, 'r', encoding='utf-8') as f:
@@ -2633,6 +2693,7 @@ def send_notification_email(to_email: str, subject: str, body: str,
                 html_body = html_body.replace('{{BODY}}', body.replace('\n', '<br>'))
                 if ntype == 'token_grant':
                     html_body = html_body.replace('{{TOKEN_AMOUNT}}', str(token_amount))
+                    html_body = html_body.replace('{{CLAIM_URL}}', claim_url)
         else:
             html_body = (
                 f'<div style="font-family:sans-serif;padding:24px;">'
@@ -2851,36 +2912,13 @@ def admin_send_notification():
         if isinstance(u, dict) and 'grant_amount' in u:
             grant_amount = u['grant_amount']
 
-        if ntype == 'token_grant' and grant_amount > 0:
-            space = conn.execute(
-                "SELECT id FROM user_spaces WHERE user_id = ? AND name = '试用'",
-                (u['id'],)).fetchone()
-            if space:
-                conn.execute(
-                    "UPDATE user_spaces SET tokens = tokens + ?, "
-                    "updated_at = datetime('now') WHERE id = ?",
-                    (grant_amount, space['id']))
-                conn.execute(
-                    "UPDATE users SET remaining_tokens = remaining_tokens + ?, "
-                    "updated_at = datetime('now') WHERE id = ?",
-                    (grant_amount, u['id']))
-            else:
-                conn.execute(
-                    "INSERT INTO user_spaces (user_id, name, description, tokens) "
-                    "VALUES (?, '试用', '专属AI试用空间', ?)",
-                    (u['id'], grant_amount))
-                conn.execute(
-                    "UPDATE users SET remaining_tokens = remaining_tokens + ?, "
-                    "updated_at = datetime('now') WHERE id = ?",
-                    (grant_amount, u['id']))
-
         conn.execute(
-            "INSERT INTO user_notifications (user_id, notification_id) "
-            "VALUES (?, ?)", (u['id'], notification_id))
+            "INSERT INTO user_notifications (user_id, notification_id, is_claimed) "
+            "VALUES (?, ?, 0)", (u['id'], notification_id))
 
         if u['is_verified']:
             send_notification_email(u['email'], subject, body,
-                ntype, grant_amount)
+                ntype, grant_amount, u['id'], notification_id)
 
         sent_count += 1
 
@@ -3060,6 +3098,314 @@ def cleanup_old_notifications():
         logger.error(f"清理通知失败: {e}")
 
 
+def check_claim_token_expiry_and_notify():
+    try:
+        conn = get_db()
+        now = datetime.now()
+        now_str = now.strftime('%Y-%m-%d %H:%M:%S')
+
+        expiring_soon = conn.execute(
+            "SELECT ct.*, u.email, u.username "
+            "FROM claim_tokens ct "
+            "JOIN users u ON ct.user_id = u.id "
+            "WHERE ct.claimed = 0 "
+            "AND datetime(ct.expires_at) BETWEEN datetime('now') AND datetime('now', '+15 minutes')"
+        ).fetchall()
+
+        for token in expiring_soon:
+            try:
+                user_email = token['email']
+                username = token['username'] or f"用户{token['user_id']}"
+                token_amount = token['token_amount']
+                expires_at = token['expires_at']
+                subject = "⏰ Token 即将过期 - DingDang Cloud"
+                body = (
+                    f"您好 {username}，\n\n"
+                    f"您有一个 DingDang Cloud Token 领取链接即将在 {expires_at} 过期！\n\n"
+                    f"🎁 Token 数量：{token_amount}\n\n"
+                    f"请尽快点击邮件中的领取链接，以免 Token 失效。\n"
+                    f"如果链接已过期，请联系管理员重新发放。"
+                )
+                if user_email:
+                    send_notification_email(
+                        user_email, subject, body,
+                        'announcement', 0, token['user_id'], token['notification_id']
+                    )
+                    logger.info(f"[Token提醒] 已发送即将过期提醒给 {user_email}, "
+                                f"Token数量={token_amount}, 过期时间={expires_at}")
+            except Exception as e:
+                logger.error(f"[Token提醒] 发送提醒邮件失败: {e}")
+
+        recently_expired = conn.execute(
+            "SELECT ct.*, u.email, u.username "
+            "FROM claim_tokens ct "
+            "JOIN users u ON ct.user_id = u.id "
+            "WHERE ct.claimed = 0 "
+            "AND datetime(ct.expires_at) BETWEEN datetime('now', '-60 minutes') AND datetime('now')"
+        ).fetchall()
+
+        for token in recently_expired:
+            try:
+                user_email = token['email']
+                username = token['username'] or f"用户{token['user_id']}"
+                token_amount = token['token_amount']
+                subject = "❌ Token 已过期 - DingDang Cloud"
+                body = (
+                    f"您好 {username}，\n\n"
+                    f"您的 DingDang Cloud Token 领取链接已过期。\n\n"
+                    f"🎁 未领取的 Token 数量：{token_amount}\n\n"
+                    f"由于链接有效期为 1 小时，您未能在有效期内完成领取。\n"
+                    f"如需重新获取 Token，请联系管理员重新发放。"
+                )
+                if user_email:
+                    send_notification_email(
+                        user_email, subject, body,
+                        'announcement', 0, token['user_id'], token['notification_id']
+                    )
+                    logger.info(f"[Token过期] 已发送过期通知给 {user_email}, "
+                                f"Token数量={token_amount}")
+                conn.execute(
+                    "DELETE FROM claim_tokens WHERE id = ?",
+                    (token['id'],))
+            except Exception as e:
+                logger.error(f"[Token过期] 处理过期Token失败: {e}")
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"[Token监控] 检查过期Token出错: {e}")
+
+
+# ==================== 一键Token领取（一次性链接） ====================
+
+@app.route('/api/auth/claim-token/<token>', methods=['POST'])
+def claim_by_token(token):
+    if not token or len(token) < 10:
+        return json_response({"error": "无效的领取链接"}, 400)
+    conn = get_db()
+    record = conn.execute(
+        "SELECT * FROM claim_tokens WHERE token = ?", (token,)
+    ).fetchone()
+    if not record:
+        conn.close()
+        return json_response({"error": "领取链接不存在或已失效"}, 404)
+    if record['claimed']:
+        conn.close()
+        return json_response({"error": "该 Token 已被领取"}, 400)
+    expires_at = datetime.strptime(record['expires_at'], '%Y-%m-%d %H:%M:%S')
+    if datetime.now() > expires_at:
+        conn.execute("DELETE FROM claim_tokens WHERE id = ?", (record['id'],))
+        conn.commit()
+        conn.close()
+        return json_response({"error": "领取链接已过期，请联系管理员重新发放"}, 400)
+    user_id = record['user_id']
+    token_amount = record['token_amount']
+    user = conn.execute(
+        "SELECT id, remaining_tokens FROM users WHERE id = ?", (user_id,)
+    ).fetchone()
+    if not user:
+        conn.close()
+        return json_response({"error": "用户不存在"}, 404)
+    space = conn.execute(
+        "SELECT id FROM user_spaces WHERE user_id = ? AND name = '试用'",
+        (user_id,)).fetchone()
+    if not space:
+        conn.execute(
+            "INSERT INTO user_spaces (user_id, name, description, tokens) "
+            "VALUES (?, '试用', '专属AI试用空间', ?)",
+            (user_id, token_amount))
+    else:
+        conn.execute(
+            "UPDATE user_spaces SET tokens = tokens + ?, "
+            "updated_at = datetime('now') WHERE id = ?",
+            (token_amount, space['id']))
+    conn.execute(
+        "UPDATE users SET remaining_tokens = remaining_tokens + ? "
+        "WHERE id = ?", (token_amount, user_id))
+    conn.execute(
+        "UPDATE user_notifications SET is_claimed = 1, "
+        "claimed_at = datetime('now') "
+        "WHERE user_id = ? AND notification_id = ? AND is_claimed = 0",
+        (user_id, record['notification_id']))
+    conn.execute(
+        "UPDATE claim_tokens SET claimed = 1, "
+        "claimed_at = datetime('now') WHERE id = ?", (record['id'],))
+    conn.commit()
+    conn.close()
+    try:
+        tdengine.update_claimed(user_id, int(record['id']))
+    except Exception:
+        pass
+    logger.info(f"[Token领取] 用户{user_id}通过链接领取了{token_amount} Token")
+    return json_response({
+        "message": f"🎉 恭喜！您已成功领取 {token_amount} Token！",
+        "token_amount": token_amount
+    })
+
+
+@app.route('/api/auth/claim-token/<token>/status', methods=['GET'])
+def claim_token_status(token):
+    if not token or len(token) < 10:
+        return json_response({"error": "无效的领取链接"}, 400)
+    conn = get_db()
+    record = conn.execute(
+        "SELECT token, token_amount, expires_at, claimed, claimed_at, "
+        "created_at FROM claim_tokens WHERE token = ?", (token,)
+    ).fetchone()
+    conn.close()
+    if not record:
+        return json_response({"error": "领取链接不存在或已失效"}, 404)
+    claimed = bool(record['claimed'])
+    expires_at = datetime.strptime(record['expires_at'], '%Y-%m-%d %H:%M:%S')
+    expired = datetime.now() > expires_at
+    return json_response({
+        "exists": True,
+        "token_amount": record['token_amount'],
+        "claimed": claimed,
+        "claimed_at": record['claimed_at'],
+        "expired": expired,
+        "expires_at": record['expires_at'],
+        "created_at": record['created_at']
+    })
+
+
+@app.route('/claim-token/<token>', methods=['GET'])
+def claim_token_page(token):
+    return inject_frontend_config("""
+    <!DOCTYPE html>
+    <html lang="zh-CN">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>领取 Token - DingDang Cloud</title>
+      <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+          background: linear-gradient(135deg, #f0f2f5, #e0e7ff);
+          min-height: 100vh;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 20px;
+        }
+        .card {
+          background: #fff;
+          border-radius: 20px;
+          box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+          padding: 48px 40px;
+          max-width: 440px;
+          width: 100%;
+          text-align: center;
+        }
+        .logo {
+          width: 56px; height: 56px;
+          background: linear-gradient(135deg, #6366f1, #14b8a6);
+          border-radius: 14px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 26px;
+          color: #fff;
+          font-weight: 800;
+          margin-bottom: 16px;
+        }
+        h1 { font-size: 22px; color: #0f172a; margin-bottom: 6px; }
+        .sub { color: #64748b; font-size: 14px; margin-bottom: 28px; }
+        .btn {
+          display: inline-block;
+          background: linear-gradient(135deg, #6366f1, #4f46e5);
+          color: #fff;
+          border: none;
+          padding: 14px 48px;
+          font-size: 16px;
+          font-weight: 600;
+          border-radius: 12px;
+          cursor: pointer;
+          transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(99,102,241,0.4); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+        .result { margin-top: 20px; padding: 16px; border-radius: 12px; font-size: 14px; display: none; }
+        .result.success { display: block; background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; }
+        .result.error { display: block; background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
+        .result.info { display: block; background: #f0f9ff; color: #2563eb; border: 1px solid #bfdbfe; }
+        .spinner { display: none; width: 20px; height: 20px; border: 3px solid #e2e8f0; border-top-color: #6366f1; border-radius: 50%; animation: spin 0.8s linear infinite; margin: 12px auto; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+      </style>
+    </head>
+    <body>
+      <div class="card" id="app">
+        <div class="logo">D</div>
+        <h1>领取 DingDang Cloud Token</h1>
+        <p class="sub">点击下方按钮领取您的专属 Token</p>
+        <div id="amountDisplay" style="font-size:36px;font-weight:800;background:linear-gradient(135deg,#6366f1,#14b8a6);-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:24px;">--</div>
+        <button class="btn" id="claimBtn" onclick="claimToken()">🎯 立即领取</button>
+        <div class="spinner" id="spinner"></div>
+        <div class="result" id="result"></div>
+      </div>
+      <script>
+        const token = window.location.pathname.split('/').pop();
+        async function checkStatus() {
+          try {
+            const r = await fetch('/api/auth/claim-token/' + token + '/status');
+            const d = await r.json();
+            if (d.exists) {
+              document.getElementById('amountDisplay').textContent = '+ ' + d.token_amount;
+              if (d.claimed) {
+                document.getElementById('claimBtn').disabled = true;
+                document.getElementById('claimBtn').textContent = '✅ 已领取';
+                showResult('您已于 ' + (d.claimed_at || '之前') + ' 领取了此 Token', 'info');
+              } else if (d.expired) {
+                document.getElementById('claimBtn').disabled = true;
+                document.getElementById('claimBtn').textContent = '⏰ 已过期';
+                showResult('此领取链接已过期，请联系管理员重新发放', 'error');
+              }
+            } else {
+              document.getElementById('claimBtn').disabled = true;
+              document.getElementById('claimBtn').textContent = '❌ 无效链接';
+              showResult('领取链接不存在或已失效', 'error');
+            }
+          } catch(e) {
+            showResult('网络错误，请重试', 'error');
+          }
+        }
+        async function claimToken() {
+          const btn = document.getElementById('claimBtn');
+          const spinner = document.getElementById('spinner');
+          btn.disabled = true;
+          spinner.style.display = 'block';
+          try {
+            const r = await fetch('/api/auth/claim-token/' + token, { method: 'POST' });
+            const d = await r.json();
+            spinner.style.display = 'none';
+            if (r.ok) {
+              showResult(d.message, 'success');
+              btn.textContent = '✅ 已领取';
+            } else {
+              showResult(d.error, 'error');
+              btn.textContent = '🔄 重试';
+              btn.disabled = false;
+            }
+          } catch(e) {
+            spinner.style.display = 'none';
+            showResult('网络错误，请重试', 'error');
+            btn.textContent = '🔄 重试';
+            btn.disabled = false;
+          }
+        }
+        function showResult(msg, type) {
+          const el = document.getElementById('result');
+          el.textContent = msg;
+          el.className = 'result ' + type;
+        }
+        checkStatus();
+      </script>
+    </body>
+    </html>
+    """)
+
+
 @app.route('/api/admin/usage-stats', methods=['GET'])
 @require_admin
 def admin_usage_stats():
@@ -3112,112 +3458,17 @@ def admin_token_stats():
     })
 
 
-# ==================== 管理任务模块 ====================
+# ==================== AI请求管理 ====================
 
-@app.route('/api/admin/tasks', methods=['GET'])
+@app.route('/api/admin/ai-requests', methods=['GET'])
 @require_admin
-def admin_list_tasks():
-    conn = get_db()
-    tasks = conn.execute(
-        "SELECT * FROM admin_tasks ORDER BY created_at ASC LIMIT 200"
-    ).fetchall()
-    conn.close()
-    return json_response({"tasks": [dict(t) for t in tasks]})
-
-
-@app.route('/api/admin/tasks', methods=['POST'])
-@require_admin
-def admin_create_task():
-    data = request.get_json()
-    title = (data.get('title') or '').strip()
-    if not title:
-        return json_response({"error": "请输入任务标题"}, 400)
-    description = (data.get('description') or '').strip()
-    priority = int(data.get('priority', 2))
-    conn = get_db()
-    user = request.current_user
-    cur = conn.execute(
-        "INSERT INTO admin_tasks (title, description, priority, created_by) VALUES (?, ?, ?, ?)",
-        (title, description, priority, user['id']))
-    task_id = cur.lastrowid
-    conn.commit()
-    task = conn.execute(
-        "SELECT * FROM admin_tasks WHERE id = ?", (task_id,)).fetchone()
-    conn.close()
-    log_admin_action(user, 'create_task', 'admin_tasks', task_id, f"创建任务: {title}")
-    return json_response({"task": dict(task), "message": "任务已创建"})
-
-
-@app.route('/api/admin/tasks/<int:task_id>', methods=['PUT'])
-@require_admin
-def admin_update_task(task_id):
-    data = request.get_json()
-    conn = get_db()
-    task = conn.execute(
-        "SELECT * FROM admin_tasks WHERE id = ?", (task_id,)).fetchone()
-    if not task:
-        conn.close()
-        return json_response({"error": "任务不存在"}, 404)
-    updates = ["updated_at = datetime('now')"]
-    params = []
-    for field in ['title', 'description', 'status', 'priority', 'assigned_to']:
-        if field in data:
-            updates.append(f"{field} = ?")
-            params.append(data[field])
-    if 'status' in data and data['status'] in ('completed', 'failed', 'canceled'):
-        updates.append("completed_at = datetime('now')")
-    if params:
-        params.append(task_id)
-        conn.execute(
-            f"UPDATE admin_tasks SET {', '.join(updates)} WHERE id = ?",
-            params)
-        conn.commit()
-    task = conn.execute(
-        "SELECT * FROM admin_tasks WHERE id = ?", (task_id,)).fetchone()
-    conn.close()
-    user = request.current_user
-    log_admin_action(user, 'update_task', 'admin_tasks', task_id, f"更新任务: {task['title']}")
-    return json_response({"task": dict(task), "message": "任务已更新"})
-
-
-@app.route('/api/admin/tasks/<int:task_id>', methods=['DELETE'])
-@require_admin
-def admin_delete_task(task_id):
-    conn = get_db()
-    task = conn.execute(
-        "SELECT * FROM admin_tasks WHERE id = ?", (task_id,)).fetchone()
-    if not task:
-        conn.close()
-        return json_response({"error": "任务不存在"}, 404)
-    conn.execute("DELETE FROM admin_tasks WHERE id = ?", (task_id,))
-    conn.commit()
-    conn.close()
-    user = request.current_user
-    log_admin_action(user, 'delete_task', 'admin_tasks', task_id, f"删除任务: {task['title']}")
-    return json_response({"message": "任务已删除"})
-
-
-@app.route('/api/admin/tasks/cleanup', methods=['POST'])
-@require_admin
-def admin_cleanup_tasks():
-    conn = get_db()
-    deleted = conn.execute(
-        "DELETE FROM admin_tasks WHERE created_at < datetime('now', '-7 days') AND status IN ('completed','canceled')"
-    ).rowcount
-    conn.commit()
-    conn.close()
-    return json_response({"message": f"已清理 {deleted} 条过期任务"})
-
-
-@app.route('/api/admin/batch-requests', methods=['GET'])
-@require_admin
-def admin_list_batch_requests():
+def admin_list_ai_requests():
     conn = get_db()
     limit = request.args.get('limit', 100, type=int)
     status_filter = request.args.get('status', '').strip()
     user_filter = request.args.get('user', '').strip()
     
-    query = "SELECT * FROM batch_requests WHERE 1=1"
+    query = "SELECT * FROM ai_requests WHERE 1=1"
     params = []
     
     if status_filter:
@@ -3235,24 +3486,24 @@ def admin_list_batch_requests():
     return json_response({"requests": [dict(r) for r in requests]})
 
 
-@app.route('/api/admin/batch-requests/<int:request_id>', methods=['GET'])
+@app.route('/api/admin/ai-requests/<string:request_id>', methods=['GET'])
 @require_admin
-def admin_get_batch_request(request_id):
+def admin_get_ai_request(request_id):
     conn = get_db()
-    req = conn.execute("SELECT * FROM batch_requests WHERE id = ?", (request_id,)).fetchone()
+    req = conn.execute("SELECT * FROM ai_requests WHERE request_id = ?", (request_id,)).fetchone()
     conn.close()
     if not req:
         return json_response({"error": "记录不存在"}, 404)
     return json_response(dict(req))
 
 
-@app.route('/api/admin/batch-requests/cleanup', methods=['POST'])
+@app.route('/api/admin/ai-requests/cleanup', methods=['POST'])
 @require_admin
-def admin_cleanup_batch_requests():
+def admin_cleanup_ai_requests():
     days = request.args.get('days', 7, type=int)
     conn = get_db()
     deleted = conn.execute(
-        "DELETE FROM batch_requests WHERE created_at < datetime('now', ?) AND status IN ('completed','failed')",
+        "DELETE FROM ai_requests WHERE created_at < datetime('now', ?) AND status IN ('completed','failed')",
         (f'-{days} days',)
     ).rowcount
     conn.commit()
@@ -3462,6 +3713,180 @@ def admin_audit_log():
     })
 
 
+# ==================== 管理员任务管理 ====================
+
+@app.route('/api/admin/tasks', methods=['GET'])
+@require_admin
+def admin_get_tasks():
+    conn = get_db()
+    tasks = conn.execute(
+        "SELECT * FROM admin_tasks ORDER BY created_at DESC"
+    ).fetchall()
+    conn.close()
+    return json_response({"tasks": [dict(t) for t in tasks]})
+
+
+@app.route('/api/admin/tasks', methods=['POST'])
+@require_admin
+def admin_create_task():
+    data = request.get_json()
+    title = (data.get('title') or '').strip()
+    if not title:
+        return json_response({"error": "请输入任务标题"}, 400)
+    description = (data.get('description') or '').strip()
+    priority = int(data.get('priority', 2))
+    current_user_id = request.current_user.get('id', request.current_user) if isinstance(request.current_user, dict) else request.current_user
+    conn = get_db()
+    c = conn.execute(
+        "INSERT INTO admin_tasks (title, description, priority, created_by) "
+        "VALUES (?, ?, ?, ?)",
+        (title, description, priority, current_user_id)
+    )
+    task_id = c.lastrowid
+    task = conn.execute(
+        "SELECT * FROM admin_tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    log_admin_action(request.current_user, 'create_task',
+        'task', task_id, f"创建任务: {title}")
+    return json_response({"task": dict(task), "message": "任务已创建"})
+
+
+@app.route('/api/admin/tasks/<int:task_id>', methods=['PUT'])
+@require_admin
+def admin_update_task(task_id):
+    data = request.get_json()
+    conn = get_db()
+    task = conn.execute(
+        "SELECT * FROM admin_tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if not task:
+        conn.close()
+        return json_response({"error": "任务不存在"}, 404)
+    updates = []
+    params = []
+    for field in ('title', 'description', 'status', 'priority', 'assigned_to'):
+        if field in data:
+            updates.append(f"{field} = ?")
+            params.append(data[field])
+    if data.get('status') in ('completed', 'failed', 'canceled'):
+        updates.append("completed_at = datetime('now')")
+    elif data.get('status') == 'in_progress' and task['status'] == 'pending':
+        updates.append("completed_at = NULL")
+    updates.append("updated_at = datetime('now')")
+    params.append(task_id)
+    conn.execute(
+        f"UPDATE admin_tasks SET {', '.join(updates)} WHERE id = ?", params
+    )
+    conn.commit()
+    task = conn.execute(
+        "SELECT * FROM admin_tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    conn.close()
+    log_admin_action(request.current_user, 'update_task',
+        'task', task_id, f"更新任务: {task['title']}")
+    return json_response({"task": dict(task), "message": "任务已更新"})
+
+
+@app.route('/api/admin/tasks/<int:task_id>', methods=['DELETE'])
+@require_admin
+def admin_delete_task(task_id):
+    conn = get_db()
+    task = conn.execute(
+        "SELECT * FROM admin_tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if not task:
+        conn.close()
+        return json_response({"error": "任务不存在"}, 404)
+    conn.execute("DELETE FROM admin_tasks WHERE id = ?", (task_id,))
+    conn.commit()
+    conn.close()
+    log_admin_action(request.current_user, 'delete_task',
+        'task', task_id, f"删除任务: {task['title']}")
+    return json_response({"message": "任务已删除"})
+
+
+@app.route('/api/admin/tasks/cleanup', methods=['POST'])
+@require_admin
+def admin_cleanup_tasks():
+    conn = get_db()
+    conn.execute(
+        "DELETE FROM admin_tasks WHERE status IN ('completed','failed','canceled') "
+        "AND completed_at IS NOT NULL "
+        "AND datetime(completed_at) < datetime('now', '-30 days')"
+    )
+    deleted = conn.total_changes
+    conn.commit()
+    conn.close()
+    log_admin_action(request.current_user, 'cleanup_tasks',
+        'task', 0, f"清理过期任务, 删除{deleted}条")
+    return json_response({"message": f"已清理 {deleted} 条过期任务"})
+
+
+# ==================== 管理中心批处理记录 ====================
+
+@app.route('/api/admin/batch-requests', methods=['GET'])
+@require_admin
+def admin_get_batch_requests():
+    limit = request.args.get('limit', 100, type=int)
+    limit = min(500, max(1, limit))
+    status = request.args.get('status', '').strip()
+    user = request.args.get('user', '').strip()
+    conn = get_db()
+    query = "SELECT * FROM batch_requests"
+    conditions = []
+    params = []
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
+    if user:
+        conditions.append("(username LIKE ? OR user_id = ?)")
+        params.append(f'%{user}%')
+        try:
+            params.append(int(user))
+        except ValueError:
+            params.append(0)
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return json_response({"requests": [dict(r) for r in rows]})
+
+
+@app.route('/api/admin/batch-requests/<int:request_id>', methods=['GET'])
+@require_admin
+def admin_get_batch_request(request_id):
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM batch_requests WHERE id = ?", (request_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return json_response({"error": "记录不存在"}, 404)
+    return json_response({"request": dict(row)})
+
+
+@app.route('/api/admin/batch-requests/cleanup', methods=['POST'])
+@require_admin
+def admin_cleanup_batch_requests():
+    days = request.args.get('days', 7, type=int)
+    conn = get_db()
+    conn.execute(
+        "DELETE FROM batch_requests WHERE "
+        "datetime(created_at) < datetime('now', ? || ' days')",
+        (f'-{days}',)
+    )
+    deleted = conn.total_changes
+    conn.commit()
+    conn.close()
+    log_admin_action(request.current_user, 'cleanup_batch',
+        'batch', 0, f"清理{days}天前的批处理记录, 删除{deleted}条")
+    return json_response({"message": f"已清理 {deleted} 条过期记录"})
+
+
 # ==================== 讯飞批处理适配器 ====================
 
 class XunfeiBatchAdapter:
@@ -3487,8 +3912,6 @@ class XunfeiBatchAdapter:
         self.session.headers.update({
             "Authorization": f"Bearer {api_password}",
         })
-        self._jobs = {}
-        self._job_lock = threading.Lock()
         logger.info("适配器初始化完成")
 
     def _resolve_model(self, model: str) -> str:
@@ -3537,15 +3960,6 @@ class XunfeiBatchAdapter:
         for idx, msg in enumerate(body_messages):
             content = msg.get('content', '')
             logger.info(f"  消息[{idx}] role={msg.get('role')} content_preview={content[:80]}")
-        return file_path
-
-    def _create_batch_file_multi(self, requests: list) -> str:
-        self._ensure_temp_dir()
-        file_path = os.path.join(self.BATCH_TEMP_DIR, f"batch_{uuid.uuid4().hex[:8]}.jsonl")
-        with open(file_path, 'w', encoding='utf-8') as f:
-            for req in requests:
-                f.write(json.dumps(req, ensure_ascii=False) + '\n')
-        logger.info(f"创建多请求批处理文件: {file_path} (请求数: {len(requests)})")
         return file_path
 
     def _upload_file(self, file_path: str) -> Optional[str]:
@@ -3684,72 +4098,6 @@ class XunfeiBatchAdapter:
             os.remove(file_path)
             logger.info(f"删除临时文件: {file_path}")
 
-    def _parse_input_file(self, content: str) -> list:
-        lines = content.strip().split('\n')
-        results = []
-        for line in lines:
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-                body = data.get('body', {})
-                messages = body.get('messages', [])
-                custom_id = data.get('custom_id', '')
-                user_msg = ""
-                for msg in messages:
-                    if msg.get('role') == 'user':
-                        user_msg = msg.get('content', '')
-                results.append({"custom_id": custom_id, "messages": messages, "user_message": user_msg})
-            except json.JSONDecodeError:
-                continue
-        return results
-
-    def _get_batch_results(self, batch_id: str) -> Optional[Dict]:
-        batch_status = self._get_batch_status(batch_id)
-        if not batch_status:
-            return None
-        status = batch_status.get('status')
-        output_file_id = batch_status.get('output_file_id')
-        input_file_id = batch_status.get('input_file_id')
-        result = {
-            "batch_id": batch_id,
-            "status": status,
-            "input_file_id": input_file_id,
-            "output_file_id": output_file_id,
-            "requests": [],
-            "responses": []
-        }
-        if input_file_id:
-            input_content = self._download_file_content(input_file_id)
-            if input_content:
-                result["requests"] = self._parse_input_file(input_content)
-                logger.info(f"解析输入文件: file_id={input_file_id}, requests_count={len(result['requests'])}")
-        if status == 'completed' and output_file_id:
-            output_content = self._download_file_content(output_file_id)
-            if output_content:
-                lines = output_content.strip().split('\n')
-                for line in lines:
-                    if not line:
-                        continue
-                    try:
-                        data = json.loads(line)
-                        custom_id = data.get('custom_id', '')
-                        resp_body = data.get('response', {}).get('body', {})
-                        choices = resp_body.get('choices', [])
-                        answer = ""
-                        if choices:
-                            msg = choices[0].get('message', {})
-                            if msg:
-                                answer = msg.get('content', '')
-                        result["responses"].append({
-                            "custom_id": custom_id,
-                            "answer": answer
-                        })
-                    except json.JSONDecodeError:
-                        continue
-                logger.info(f"解析结果文件: file_id={output_file_id}, responses_count={len(result['responses'])}")
-        return result
-
     def process_prompt(self, messages: list, model: str = "qwen",
                        max_tokens: int = 500,
                        temperature: float = 0.7,
@@ -3869,214 +4217,6 @@ class XunfeiBatchAdapter:
         yield f"data: {json.dumps(done_data, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
 
-    def submit_job(self, messages: list, model: str = "qwen",
-                   max_tokens: int = 500,
-                   temperature: float = 0.7,
-                   system_message: str = None,
-                   user_id: int = None,
-                   username: str = None,
-                   prompt_tokens: int = 0) -> str:
-        job_id = f"job_{uuid.uuid4().hex[:12]}"
-        prompt_preview = ""
-        for msg in messages:
-            c = msg.get('content', '')
-            if isinstance(c, bytes):
-                c = c.decode('utf-8')
-            prompt_preview += c
-        
-        with self._job_lock:
-            self._jobs[job_id] = {
-                "id": job_id,
-                "status": "queued",
-                "created_at": int(time.time()),
-                "updated_at": int(time.time()),
-                "user_id": user_id,
-                "username": username,
-                "model": model,
-                "prompt": prompt_preview[:2000],
-                "prompt_tokens": prompt_tokens,
-                "result": None,
-                "error": None
-            }
-        
-        try:
-            conn = get_db()
-            conn.execute('''
-                INSERT INTO batch_requests (user_id, username, job_id, model, prompt, prompt_tokens, status)
-                VALUES (?, ?, ?, ?, ?, ?, 'queued')
-            ''', (user_id, username or 'unknown', job_id, model, prompt_preview[:2000], prompt_tokens))
-            conn.commit()
-            req = conn.execute("SELECT * FROM batch_requests WHERE job_id=?", (job_id,)).fetchone()
-            conn.close()
-            if req:
-                push_batch_update({"type": "new", "request": dict(req)})
-        except Exception as e:
-            logger.error(f"记录批处理请求失败: {e}")
-        
-        thread = threading.Thread(
-            target=self._process_job_background,
-            args=(job_id, messages, model, max_tokens, temperature, system_message, user_id),
-            daemon=True
-        )
-        thread.start()
-        logger.info(f"异步任务已提交: job_id={job_id}, user={username}, model={model}, "
-                    f"prompt_tokens={prompt_tokens}, prompt_preview={prompt_preview[:80]}")
-        return job_id
-
-    def _process_job_background(self, job_id: str, messages: list,
-                                 model: str, max_tokens: int,
-                                 temperature: float,
-                                 system_message: str = None,
-                                 user_id: int = None):
-        def update(status: str, result=None, error=None, result_tokens=0, prompt_tokens=0):
-            with self._job_lock:
-                if job_id in self._jobs:
-                    self._jobs[job_id]["status"] = status
-                    self._jobs[job_id]["updated_at"] = int(time.time())
-                    if result:
-                        self._jobs[job_id]["result"] = result
-                    if error:
-                        self._jobs[job_id]["error"] = error
-            try:
-                conn = get_db()
-                if status == 'completed' and result:
-                    answer = result.get("choices", [{}])[0].get("text", "")
-                    total_tokens = prompt_tokens + result_tokens
-                    conn.execute('''
-                        UPDATE batch_requests SET status=?, result=?, result_tokens=?, prompt_tokens=?, updated_at=datetime('now')
-                        WHERE job_id=?
-                    ''', (status, answer[:4000], result_tokens, prompt_tokens, job_id))
-                    if user_id:
-                        conn.execute(
-                            "UPDATE users SET remaining_tokens = MAX(remaining_tokens - ?, 0) WHERE id = ?",
-                            (total_tokens, user_id))
-                        conn.execute(
-                            "INSERT INTO api_usage_log (user_id, prompt_tokens, completion_tokens) VALUES (?, ?, ?)",
-                            (user_id, prompt_tokens, result_tokens))
-                elif status == 'failed' and error:
-                    conn.execute('''
-                        UPDATE batch_requests SET status=?, error=?, updated_at=datetime('now')
-                        WHERE job_id=?
-                    ''', (status, str(error)[:500], job_id))
-                else:
-                    conn.execute('''
-                        UPDATE batch_requests SET status=?, updated_at=datetime('now')
-                        WHERE job_id=?
-                    ''', (status, job_id))
-                conn.commit()
-                req = conn.execute("SELECT * FROM batch_requests WHERE job_id=?", (job_id,)).fetchone()
-                conn.close()
-                if req:
-                    push_batch_update({"type": "update", "request": dict(req)})
-            except Exception as e:
-                logger.error(f"更新批处理状态失败: {e}")
-        try:
-            update("processing")
-            logger.info(f"后台任务开始执行: job_id={job_id}")
-            result = self.process_prompt(
-                messages, model, max_tokens, temperature, system_message)
-            if "error" in result:
-                logger.error(f"后台任务失败: job_id={job_id}, error={result['error']}")
-                update("failed", error=result["error"])
-            else:
-                answer = result.get("choices", [{}])[0].get("text", "")
-                usage = result.get("usage", {})
-                result_tokens = usage.get("completion_tokens", len(answer) // 4)
-                prompt_tokens = usage.get("prompt_tokens", 0)
-                if prompt_tokens == 0:
-                    prompt_text = ""
-                    for msg in messages:
-                        c = msg.get('content', '')
-                        if isinstance(c, bytes):
-                            c = c.decode('utf-8')
-                        prompt_text += c
-                    prompt_tokens = calculate_tokens(prompt_text)
-                logger.info(f"后台任务完成: job_id={job_id}, answer_len={len(answer)}, "
-                            f"prompt_tokens={prompt_tokens}, result_tokens={result_tokens}")
-                update("completed", result=result, result_tokens=result_tokens, prompt_tokens=prompt_tokens)
-        except Exception as e:
-            logger.error(f"后台任务异常: job_id={job_id}, error={str(e)}", exc_info=True)
-            update("failed", error=str(e))
-
-    def get_job(self, job_id: str) -> Optional[Dict]:
-        with self._job_lock:
-            return self._jobs.get(job_id)
-
-    def list_jobs(self, limit: int = 20, user_id: int = None) -> list:
-        with self._job_lock:
-            jobs = list(self._jobs.values())
-            if user_id is not None:
-                jobs = [j for j in jobs if j.get("user_id") == user_id]
-            jobs.sort(key=lambda j: j.get("created_at", 0), reverse=True)
-            return jobs[:limit]
-
-    def list_files(self, page: int = 1, size: int = 20) -> Optional[Dict]:
-        url = f"{self.base_url}/v1/files?page={page}&size={size}"
-        response = self.session.get(url)
-        if response.status_code == 200:
-            return response.json()
-        logger.error(f"查询文件列表失败: {response.status_code}")
-        return None
-
-    def get_file_info(self, file_id: str) -> Optional[Dict]:
-        url = f"{self.base_url}/v1/files/{file_id}"
-        response = self.session.get(url)
-        if response.status_code == 200:
-            return response.json()
-        logger.error(f"查询文件信息失败: {response.status_code}")
-        return None
-
-    def delete_file(self, file_id: str) -> Optional[Dict]:
-        url = f"{self.base_url}/v1/files/{file_id}"
-        response = self.session.delete(url)
-        if response.status_code == 200:
-            return response.json()
-        logger.error(f"删除文件失败: {response.status_code}")
-        return None
-
-    def list_batches(self, limit: int = 10, after: str = None) -> Optional[Dict]:
-        url = f"{self.base_url}/v1/batches?limit={limit}"
-        if after:
-            url += f"&after={after}"
-        else:
-            url += "&after=_"
-        response = self.session.get(url)
-        if response.status_code == 200:
-            return response.json()
-        logger.error(f"查询批处理列表失败: status={response.status_code}, body={response.text[:500]}")
-        return None
-
-    def cancel_batch(self, batch_id: str) -> Optional[Dict]:
-        url = f"{self.base_url}/v1/batches/{batch_id}/cancel"
-        response = self.session.get(url)
-        if response.status_code == 200:
-            return response.json()
-        logger.error(f"取消批处理失败: {response.status_code}")
-        return None
-
-    def upload_and_batch(self, requests_data: list) -> Dict:
-        file_path = None
-        try:
-            file_path = self._create_batch_file_multi(requests_data)
-            file_id = self._upload_file(file_path)
-            if not file_id:
-                return {"error": "文件上传失败"}
-            batch_id = self._create_batch(file_id)
-            if not batch_id:
-                return {"error": "创建批处理任务失败"}
-            return {
-                "file_id": file_id,
-                "batch_id": batch_id,
-                "status": "created",
-                "message": "批处理任务已创建，可通过 /v1/batch/batches/{batch_id} 查询状态"
-            }
-        except Exception as e:
-            logger.error(f"上传并批处理异常: {str(e)}")
-            return {"error": str(e)}
-        finally:
-            if file_path:
-                self._cleanup(file_path)
-
 
 API_PASSWORD = CFG['api']['xfyun_password']
 ADAPTER = XunfeiBatchAdapter(API_PASSWORD) if API_PASSWORD else None
@@ -4171,6 +4311,173 @@ def calculate_tokens(text: str) -> int:
         (other_chars / config['other_ratio']) +
         0.5)
     return max(tokens, 1)
+
+
+# ==================== 联网搜索工具 ====================
+
+SEARCH_CACHE = {}
+SEARCH_CACHE_TTL = 300
+
+def perform_web_search(query: str, max_results: int = 5) -> str:
+    cache_key = query.strip().lower()
+    cached = SEARCH_CACHE.get(cache_key)
+    if cached and time.time() - cached['time'] < SEARCH_CACHE_TTL:
+        logger.info(f"[联网搜索] 使用缓存结果: {query}")
+        return cached['result']
+    
+    search_engines = [
+        {
+            "name": "Bing",
+            "url": "https://cn.bing.com/search",
+            "params": {"q": query, "setmkt": "zh-CN"},
+        },
+        {
+            "name": "Baidu",
+            "url": "https://www.baidu.com/s",
+            "params": {"wd": query, "ie": "utf-8"},
+        },
+    ]
+    
+    for engine in search_engines:
+        try:
+            logger.info(f"[联网搜索] 尝试{engine['name']}: {query}")
+            resp = requests.get(
+                engine["url"],
+                params=engine["params"],
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                  "Chrome/120.0.0.0 Safari/537.36"
+                },
+                timeout=10
+            )
+            if resp.status_code != 200:
+                logger.warning(f"[联网搜索] {engine['name']}请求失败: status={resp.status_code}")
+                continue
+            
+            import html as html_module
+            results = []
+            
+            if engine["name"] == "Bing":
+                sections = re.findall(r'<li[^>]*b_algo[^>]*>(.*?)</li>', resp.text, re.DOTALL)
+                for sec in sections[:max_results]:
+                    h2_matches = re.findall(r'<h2[^>]*>(.*?)</h2>', sec, re.DOTALL)
+                    title_text = ""
+                    if h2_matches:
+                        title_text = html_module.unescape(re.sub(r'<[^>]+>', '', h2_matches[0]).strip())
+                    if not title_text or len(title_text) < 3:
+                        continue
+                    snippet = ""
+                    p_matches = re.findall(r'<p[^>]*class=\"b_lineclamp[^\"]*\"[^>]*>(.*?)</p>', sec, re.DOTALL)
+                    if p_matches:
+                        snippet = html_module.unescape(re.sub(r'<[^>]+>', '', p_matches[0]).strip())
+                    if snippet:
+                        results.append(f"{title_text} — {snippet[:200]}")
+                    else:
+                        results.append(title_text)
+            elif engine["name"] == "Baidu":
+                for m in re.findall(r'<div[^>]*class=\"c-abstract\"[^>]*>(.*?)</div>', resp.text, re.DOTALL):
+                    text = html_module.unescape(re.sub(r'<[^>]+>', '', m).strip())
+                    if text and len(text) > 10:
+                        results.append(text)
+                        if len(results) >= max_results:
+                            break
+                if not results:
+                    for m in re.findall(r'<span[^>]*class=\"content[^\"]*\"[^>]*>(.*?)</span>', resp.text, re.DOTALL):
+                        text = html_module.unescape(re.sub(r'<[^>]+>', '', m).strip())
+                        if text and len(text) > 10:
+                            results.append(text)
+                            if len(results) >= max_results:
+                                break
+            
+            if results:
+                formatted = "\n".join(f"{i+1}. {r}" for i, r in enumerate(results[:max_results]))
+                SEARCH_CACHE[cache_key] = {'result': formatted, 'time': time.time()}
+                logger.info(f"[联网搜索] {engine['name']}成功获取{len(results[:max_results])}条结果")
+                return formatted
+            logger.warning(f"[联网搜索] {engine['name']}未获取到结果")
+        except Exception as e:
+            logger.error(f"[联网搜索] {engine['name']}出错: {str(e)}")
+            continue
+    
+    logger.error(f"[联网搜索] 所有搜索引擎均失败")
+    return ""
+
+
+def sanitize_messages(messages: list) -> list:
+    cleaned = []
+    injection_patterns = [
+        r'(?i)(?:忽略|忽略|无视|不要管|ignore|forget|disregard|overwrite)\s*(?:上述|以上|之前|前面|previous|above|all)\s*(?:指令|指示|要求|内容|instructions|context|prompt)',
+        r'(?i)(?:你是|你是|从现在起|从现在开始|你现在的角色是|you are now|you are a|act as|pretend to be|from now on)\s*(?:系统|管理员|admin|system|开发者|developer)',
+        r'(?i)(?:输出|打印|打印|显示|show|print|output|display)\s*(?:分隔符|delimiter|separator|"---"|"===")',
+        r'(?i)(?:重复|repeat|say|告诉我|告诉我|回答以上|answer above)\s*(?:我的|my|the|我|我上面|above)\s*(?:提示|prompt|问题|question|内容|content)',
+        r'(?i)(?:用.{0,20}(?:语|语言|language)\s*(?:回答|输出|回复|respond|answer|output))',
+    ]
+    for msg in messages:
+        content = msg.get('content', '')
+        role = msg.get('role', '')
+        if isinstance(content, bytes):
+            content = content.decode('utf-8')
+        if role == 'user' and isinstance(content, str):
+            for pat in injection_patterns:
+                content = re.sub(pat, '[内容已过滤]', content)
+        cleaned.append({"role": role, "content": content})
+    return cleaned
+
+
+def build_messages_with_features(messages: list, web_search: bool, deep_think: bool) -> list:
+    messages = sanitize_messages(messages)
+    modified = list(messages)
+
+    now = datetime.now()
+    time_prompt = (
+        f"当前日期时间: {now.strftime('%Y年%m月%d日 %H:%M:%S')} "
+        f"(星期{['一','二','三','四','五','六','日'][now.weekday()]})"
+    )
+
+    has_system = any(m.get('role') == 'system' for m in modified)
+
+    if has_system:
+        for m in modified:
+            if m.get('role') == 'system':
+                if time_prompt not in m['content']:
+                    m['content'] = time_prompt + "\n\n" + m['content']
+                break
+    else:
+        modified.insert(0, {
+            "role": "system",
+            "content": time_prompt
+        })
+
+    has_system = any(m.get('role') == 'system' for m in modified)
+
+    if deep_think:
+        for m in modified:
+            if m.get('role') == 'system':
+                m['content'] = (
+                    "请一步一步推理（chain-of-thought），详细展示你的思考过程，"
+                    "然后给出最终答案。\n\n" + m['content']
+                )
+                break
+
+    if web_search:
+        user_question = extract_real_question(messages)
+        if user_question:
+            search_results = perform_web_search(user_question)
+            if search_results:
+                search_context = (
+                    f"以下是来自互联网的最新搜索结果，请基于这些信息回答用户的问题：\n\n"
+                    f"{search_results}\n\n"
+                    f"请结合搜索结果和你的知识给出完整、准确的回答。"
+                )
+                for m in modified:
+                    if m.get('role') == 'system':
+                        m['content'] = m['content'] + "\n\n" + search_context
+                        break
+                logger.info(f"[联网搜索] 已将搜索结果注入系统消息")
+            else:
+                logger.warning(f"[联网搜索] 搜索结果为空，未注入上下文")
+    return modified
 
 
 # ==================== API 路由 ====================
@@ -4282,57 +4589,81 @@ def chat_completions():
         max_tokens = data.get('max_tokens', 500)
         temperature = data.get('temperature', 0.7)
         stream = data.get('stream', False)
+        web_search = data.get('web_search', False)
+        deep_think = data.get('deep_think', False)
 
         if not ADAPTER:
             return json_response(
                 {"error": "AI服务未配置，请联系管理员"}, 500)
 
-        context_messages = []
-        loaded_context_tokens = 0
-        if space_id is not None:
-            space_context, loaded_context_tokens = load_space_context(space_id, user['id'])
-            if space_context is None:
-                return json_response({"error": "空间不存在"}, 404)
-            context_messages = space_context
-            logger.info(f"加载了 {len(context_messages)} 条历史上下文, 共 {loaded_context_tokens} tokens")
-        else:
-            room_context, room_loaded_tokens = load_room_context(room_id)
-            context_messages = room_context
-            loaded_context_tokens = room_loaded_tokens
-            logger.info(f"按 room_id 加载了 {len(context_messages)} 条历史上下文, 共 {loaded_context_tokens} tokens (room: {room_id})")
-
-        augmented_messages = context_messages + messages
-
-        system_message = None
-        for msg in augmented_messages:
-            if msg.get('role') == 'system':
-                system_message = msg.get('content', '')
-                break
-
-        prompt_text_for_tokens = ""
-        for msg in augmented_messages:
+        prompt_text = ""
+        for msg in messages:
             c = msg.get('content', '')
             if isinstance(c, bytes):
                 c = c.decode('utf-8')
-            prompt_text_for_tokens += c
-        required_tokens = calculate_tokens(prompt_text_for_tokens)
+            prompt_text += c
+        question = prompt_text.strip() or "你好"
+
+        base_tokens = calculate_tokens(question)
+        web_search_tokens = 20 if web_search else 0
+        deep_think_tokens = 1 if deep_think else 0
+        total_required_tokens = base_tokens + web_search_tokens + deep_think_tokens + max_tokens
 
         check_result = check_concurrent_and_tokens(
-            user['id'], user['api_key'], required_tokens, space_id)
+            user['id'], user['api_key'], total_required_tokens, space_id)
         if not check_result['success']:
             return json_response({"error": check_result['error']}, 403)
 
+        request_id = f"req_{uuid.uuid4().hex[:16]}"
+        username = user.get('username', 'unknown')
+        request_json_data = json.dumps({
+            "request_id": request_id,
+            "user_id": user['id'],
+            "username": username,
+            "room_id": room_id,
+            "question": question,
+            "base_tokens": base_tokens,
+            "web_search": web_search,
+            "web_search_tokens": web_search_tokens,
+            "deep_think": deep_think,
+            "deep_think_tokens": deep_think_tokens,
+            "total_required_tokens": total_required_tokens,
+            "model": "qwen",
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": stream,
+            "space_id": space_id,
+            "timestamp": datetime.now().isoformat()
+        }, ensure_ascii=False)
+
+        conn = get_db()
+        conn.execute('''
+            INSERT INTO ai_requests (request_id, user_id, username, room_id, question,
+                question_tokens, web_search, deep_think, total_tokens, request_json, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+        ''', (request_id, user['id'], username, room_id, question[:2000],
+              base_tokens, 1 if web_search else 0, 1 if deep_think else 0,
+              total_required_tokens, request_json_data))
+        conn.commit()
+        conn.close()
+
+        logger.info(f"AI请求已创建: request_id={request_id}, base_tokens={base_tokens}, "
+                    f"web_search={web_search}(+{web_search_tokens}), deep_think={deep_think}(+{deep_think_tokens}), "
+                    f"total_required={total_required_tokens}, room_id={room_id}")
+
         if stream:
-            if not ADAPTER:
-                return json_response({"error": "AI服务未配置，请联系管理员"}, 500)
             def generate():
-                request_id = add_concurrent_request(user['id'], user['api_key'])
+                conn = get_db()
+                conn.execute("UPDATE ai_requests SET status='processing', updated_at=datetime('now') WHERE request_id=?", (request_id,))
+                conn.commit()
+                conn.close()
                 try:
+                    enhanced_msgs = build_messages_with_features(messages, web_search, deep_think)
                     for event in ADAPTER.generate_sse_events(
-                            augmented_messages, "qwen", max_tokens, temperature, system_message):
+                            enhanced_msgs, "qwen", max_tokens, temperature):
                         yield event
                 finally:
-                    remove_concurrent_request(request_id)
+                    pass
             return Response(generate(), mimetype='text/event-stream',
                           headers={
                               'Cache-Control': 'no-cache',
@@ -4340,66 +4671,67 @@ def chat_completions():
                               'Connection': 'keep-alive'
                           })
 
-        request_id = add_concurrent_request(user['id'], user['api_key'])
+        concurrent_id = add_concurrent_request(user['id'], user['api_key'])
 
         try:
-            logger.info(f"处理请求，消息数: {len(augmented_messages)}")
+            conn = get_db()
+            conn.execute("UPDATE ai_requests SET status='processing', updated_at=datetime('now') WHERE request_id=?", (request_id,))
+            conn.commit()
+            conn.close()
+            push_ai_request_update({
+                "type": "update",
+                "request_id": request_id,
+                "status": "processing"
+            })
+
+            logger.info(f"处理AI请求: request_id={request_id}, 消息数: {len(messages)}")
+            enhanced_messages = build_messages_with_features(messages, web_search, deep_think)
             response = ADAPTER.process_prompt(
-                augmented_messages, "qwen", max_tokens, temperature, system_message)
+                enhanced_messages, "qwen", max_tokens, temperature)
             if "error" in response:
-                logger.error(f"处理错误: {response['error']}")
+                logger.error(f"AI处理错误: request_id={request_id}, error={response['error']}")
+                conn = get_db()
+                conn.execute(
+                    "UPDATE ai_requests SET status='failed', error=?, updated_at=datetime('now') WHERE request_id=?",
+                    (str(response['error'])[:500], request_id))
+                conn.commit()
+                conn.close()
+                push_ai_request_update({
+                    "type": "update",
+                    "request_id": request_id,
+                    "status": "failed",
+                    "error": response['error']
+                })
                 return json_response(response, 500)
 
             answer_text = response["choices"][0]["text"]
-            total_used_tokens = response["usage"]["total_tokens"]
+            ai_prompt_tokens = response["usage"]["prompt_tokens"]
+            ai_completion_tokens = response["usage"]["completion_tokens"]
+            ai_total_tokens = response["usage"]["total_tokens"]
+            total_deduct = ai_total_tokens + web_search_tokens + deep_think_tokens
 
-            deduct_result = deduct_tokens(user['id'], total_used_tokens, space_id)
+            deduct_result = deduct_tokens(user['id'], total_deduct, space_id)
             remaining_tokens = deduct_result['remaining_tokens']
             space_tokens = deduct_result['space_tokens']
+
+            response_id = response.get("id", f"cmpl-{uuid.uuid4().hex[:12]}")
 
             conn = get_db()
             conn.execute(
                 "INSERT INTO api_usage_log (user_id, api_key, prompt_tokens, completion_tokens) "
                 "VALUES (?, ?, ?, ?)",
-                (user['id'], user['api_key'],
-                 response['usage']['prompt_tokens'],
-                 response['usage']['completion_tokens']))
-            
-            job_id = f"chat_{uuid.uuid4().hex[:12]}"
-            prompt_text = ""
-            for msg in messages:
-                c = msg.get('content', '')
-                if isinstance(c, bytes):
-                    c = c.decode('utf-8')
-                prompt_text += c
-            username = user['username'] if 'username' in user.keys() else 'unknown'
+                (user['id'], user['api_key'], ai_prompt_tokens, ai_completion_tokens))
             conn.execute('''
-                INSERT INTO batch_requests (user_id, username, job_id, model, prompt, prompt_tokens, status, result, result_tokens)
-                VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, ?)
-            ''', (user['id'], username, job_id, 'qwen', prompt_text[:2000],
-                  response['usage']['prompt_tokens'], answer_text[:4000], response['usage']['completion_tokens']))
-            
+                UPDATE ai_requests SET status='completed', answer=?, total_tokens=?,
+                    updated_at=datetime('now') WHERE request_id=?
+            ''', (answer_text[:4000], total_deduct, request_id))
             conn.commit()
             conn.close()
-            
-            push_batch_update({
-                "type": "new",
-                "request": {
-                    "id": 0,
-                    "user_id": user['id'],
-                    "username": username,
-                    "job_id": job_id,
-                    "model": "qwen",
-                    "prompt": prompt_text[:2000],
-                    "prompt_tokens": response['usage']['prompt_tokens'],
-                    "status": "completed",
-                    "result": answer_text[:4000],
-                    "result_tokens": response['usage']['completion_tokens'],
-                    "error": None,
-                    "xfyun_batch_id": None,
-                    "created_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    "updated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                }
+
+            push_ai_request_update({
+                "type": "update",
+                "request_id": request_id,
+                "status": "completed"
             })
 
             if space_id is not None:
@@ -4413,42 +4745,49 @@ def chat_completions():
                         save_room_context(room_id, user['id'], msg['role'], msg['content'])
                 save_room_context(room_id, user['id'], 'assistant', answer_text)
 
-            logger.info(f"AI回答: {answer_text[:100]}...")
+            logger.info(f"AI回答完成: request_id={request_id}, answer_preview={answer_text[:100]}...")
             warnings = []
             if remaining_tokens <= 10:
                 warnings.append(f"Token即将用完，剩余仅{remaining_tokens}")
             if remaining_tokens <= 0:
                 answer_text += "\n\n[Token已用完，输出已被截断，请及时补充Token]"
                 warnings.append("Token已用完，后续请求将被拒绝")
-            if user['remaining_tokens'] - total_used_tokens <= 0 and total_used_tokens > 0:
+            if user['remaining_tokens'] - total_deduct <= 0 and total_deduct > 0:
                 warnings.append("本次请求已消耗全部剩余Token")
+
             chat_response = {
-                "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+                "id": response_id,
+                "request_id": request_id,
                 "object": "chat.completion",
-                "created": response["created"],
+                "created": response.get("created", int(time.time())),
                 "choices": [
                     {"index": 0,
                      "message": {"role": "assistant", "content": answer_text},
                      "finish_reason": "stop"}
                 ],
                 "usage": {
-                    "prompt_tokens": response['usage']['prompt_tokens'],
-                    "completion_tokens": response['usage']['completion_tokens'],
-                    "total_tokens": total_used_tokens,
-                    "use-token": total_used_tokens,
+                    "prompt_tokens": ai_prompt_tokens,
+                    "completion_tokens": ai_completion_tokens,
+                    "total_tokens": ai_total_tokens,
+                    "base_tokens": base_tokens,
+                    "web_search_tokens": web_search_tokens,
+                    "deep_think_tokens": deep_think_tokens,
+                    "use-token": total_deduct,
                     "token": remaining_tokens,
-                    "space_tokens": space_tokens,
-                    "context_messages": len(context_messages),
-                    "context_tokens": loaded_context_tokens,
-                    "context_type": ("space" if space_id is not None else "room")
-                }
+                    "space_tokens": space_tokens
+                },
+                "features": {
+                    "web_search": web_search,
+                    "deep_think": deep_think
+                },
+                "room_id": room_id
             }
             if warnings:
                 chat_response["warning"] = "；".join(warnings)
             logger.info("=" * 60)
             return json_response(chat_response)
         finally:
-            remove_concurrent_request(request_id)
+            remove_concurrent_request(concurrent_id)
 
     except Exception as e:
         logger.error(f"服务器错误: {str(e)}", exc_info=True)
@@ -4473,31 +4812,86 @@ def completions():
         model = data.get('model', 'qwen')
         max_tokens = data.get('max_tokens', 500)
         temperature = data.get('temperature', 0.7)
+        room_id = data.get('room_id', '1')
+        web_search = data.get('web_search', False)
+        deep_think = data.get('deep_think', False)
         if not prompt:
             return json_response({"error": "请输入您的问题"}, 400)
         if not ADAPTER:
             return json_response(
                 {"error": "AI服务未配置，请联系管理员"}, 500)
 
-        required_tokens = calculate_tokens(prompt)
+        base_tokens = calculate_tokens(prompt)
+        web_search_tokens = 20 if web_search else 0
+        deep_think_tokens = 1 if deep_think else 0
+        total_required_tokens = base_tokens + web_search_tokens + deep_think_tokens + max_tokens
 
         check_result = check_concurrent_and_tokens(
-            user['id'], user['api_key'], required_tokens)
+            user['id'], user['api_key'], total_required_tokens)
         if not check_result['success']:
             return json_response({"error": check_result['error']}, 403)
 
-        request_id = add_concurrent_request(user['id'], user['api_key'])
+        request_id = f"req_{uuid.uuid4().hex[:16]}"
+        username = user.get('username', 'unknown')
+        request_json_data = json.dumps({
+            "request_id": request_id,
+            "user_id": user['id'],
+            "username": username,
+            "room_id": room_id,
+            "question": prompt,
+            "base_tokens": base_tokens,
+            "web_search": web_search,
+            "web_search_tokens": web_search_tokens,
+            "deep_think": deep_think,
+            "deep_think_tokens": deep_think_tokens,
+            "total_required_tokens": total_required_tokens,
+            "model": model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "timestamp": datetime.now().isoformat()
+        }, ensure_ascii=False)
+
+        conn = get_db()
+        conn.execute('''
+            INSERT INTO ai_requests (request_id, user_id, username, room_id, question,
+                question_tokens, web_search, deep_think, total_tokens, request_json, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+        ''', (request_id, user['id'], username, room_id, prompt[:2000],
+              base_tokens, 1 if web_search else 0, 1 if deep_think else 0,
+              total_required_tokens, request_json_data))
+        conn.commit()
+        conn.close()
+
+        logger.info(f"AI请求已创建: request_id={request_id}, base_tokens={base_tokens}, "
+                    f"web_search={web_search}(+{web_search_tokens}), deep_think={deep_think}(+{deep_think_tokens}), "
+                    f"total_required={total_required_tokens}, room_id={room_id}")
+
+        conn = get_db()
+        conn.execute("UPDATE ai_requests SET status='processing', updated_at=datetime('now') WHERE request_id=?", (request_id,))
+        conn.commit()
+        conn.close()
+
+        concurrent_id = add_concurrent_request(user['id'], user['api_key'])
 
         try:
             messages = [{"role": "user", "content": prompt}]
+            enhanced_messages = build_messages_with_features(messages, web_search, deep_think)
             response = ADAPTER.process_prompt(
-                messages, model, max_tokens, temperature)
+                enhanced_messages, model, max_tokens, temperature)
             if "error" in response:
+                conn = get_db()
+                conn.execute(
+                    "UPDATE ai_requests SET status='failed', error=?, updated_at=datetime('now') WHERE request_id=?",
+                    (str(response['error'])[:500], request_id))
+                conn.commit()
+                conn.close()
                 return json_response(response, 500)
 
-            total_used_tokens = response["usage"]["total_tokens"]
+            answer_text = response["choices"][0]["text"]
+            ai_total_tokens = response["usage"]["total_tokens"]
+            total_deduct = ai_total_tokens + web_search_tokens + deep_think_tokens
 
-            deduct_result = deduct_tokens(user['id'], total_used_tokens)
+            deduct_result = deduct_tokens(user['id'], total_deduct)
             remaining_tokens = deduct_result['remaining_tokens']
 
             warnings = []
@@ -4513,17 +4907,31 @@ def completions():
                 (user['id'], user['api_key'],
                  response['usage']['prompt_tokens'],
                  response['usage']['completion_tokens']))
+            conn.execute('''
+                UPDATE ai_requests SET status='completed', answer=?, total_tokens=?,
+                    updated_at=datetime('now') WHERE request_id=?
+            ''', (answer_text[:4000], total_deduct, request_id))
             conn.commit()
             conn.close()
 
-            response["usage"]["use-token"] = total_used_tokens
+            response["id"] = response.get("id", f"cmpl-{uuid.uuid4().hex[:12]}")
+            response["request_id"] = request_id
+            response["usage"]["base_tokens"] = base_tokens
+            response["usage"]["web_search_tokens"] = web_search_tokens
+            response["usage"]["deep_think_tokens"] = deep_think_tokens
+            response["usage"]["use-token"] = total_deduct
             response["usage"]["token"] = remaining_tokens
+            response["features"] = {
+                "web_search": web_search,
+                "deep_think": deep_think
+            }
+            response["room_id"] = room_id
             if warnings:
                 response["warning"] = "；".join(warnings)
 
             return json_response(response)
         finally:
-            remove_concurrent_request(request_id)
+            remove_concurrent_request(concurrent_id)
     except Exception as e:
         logger.error(f"服务器错误: {str(e)}")
         return json_response({"error": str(e)}, 500)
@@ -4567,298 +4975,6 @@ def calculate_tokens_api():
     except Exception as e:
         logger.error(f"计算token失败: {str(e)}")
         return json_response({"error": str(e)}, 500)
-
-
-# ==================== 批处理管理API ====================
-
-
-@app.route('/v1/batch/jobs', methods=['POST'])
-def submit_batch_job():
-    user = authenticate_request()
-    if not user:
-        return json_response({"error": "请提供有效的认证凭证"}, 401)
-    if not ADAPTER:
-        return json_response({"error": "AI服务未配置"}, 500)
-    try:
-        data = request.get_json()
-        messages = data.get('messages', [])
-        model = data.get('model', 'qwen')
-        max_tokens = data.get('max_tokens', 500)
-        temperature = data.get('temperature', 0.7)
-        if not messages:
-            return json_response({"error": "请提供 messages"}, 400)
-        
-        prompt_text = ""
-        for msg in messages:
-            c = msg.get('content', '')
-            if isinstance(c, bytes):
-                c = c.decode('utf-8')
-            prompt_text += c
-        
-        prompt_tokens = calculate_tokens(prompt_text)
-        estimated_tokens = prompt_tokens + max_tokens
-        
-        check = check_concurrent_and_tokens(user['id'], user['api_key'] if 'api_key' in user.keys() else '', estimated_tokens)
-        if not check['success']:
-            return json_response({"error": check['error']}, 429)
-        
-        system_message = None
-        for msg in messages:
-            if msg.get('role') == 'system':
-                system_message = msg.get('content', '')
-                break
-        
-        username = user['username'] if 'username' in user.keys() else 'unknown'
-        job_id = ADAPTER.submit_job(
-            messages, model, max_tokens, temperature,
-            system_message, user_id=user['id'], username=username,
-            prompt_tokens=prompt_tokens)
-        
-        return json_response({
-            "job_id": job_id,
-            "status": "queued",
-            "prompt_tokens": prompt_tokens,
-            "message": "任务已提交，可通过 /v1/batch/jobs/{job_id} 查询状态"
-        })
-    except Exception as e:
-        logger.error(f"提交批处理任务失败: {str(e)}")
-        return json_response({"error": str(e)}, 500)
-
-
-@app.route('/v1/batch/jobs', methods=['GET'])
-def list_batch_jobs():
-    user = authenticate_request()
-    if not user:
-        return json_response({"error": "请提供有效的认证凭证"}, 401)
-    if not ADAPTER:
-        return json_response({"error": "AI服务未配置"}, 500)
-    try:
-        limit = request.args.get('limit', 20, type=int)
-        jobs = ADAPTER.list_jobs(limit=limit, user_id=user['id'])
-        return json_response({
-            "object": "list",
-            "data": jobs
-        })
-    except Exception as e:
-        logger.error(f"查询任务列表失败: {str(e)}")
-        return json_response({"error": str(e)}, 500)
-
-
-@app.route('/v1/batch/jobs/<job_id>', methods=['GET'])
-def get_batch_job(job_id):
-    user = authenticate_request()
-    if not user:
-        return json_response({"error": "请提供有效的认证凭证"}, 401)
-    if not ADAPTER:
-        return json_response({"error": "AI服务未配置"}, 500)
-    try:
-        job = ADAPTER.get_job(job_id)
-        if not job:
-            return json_response({"error": "任务不存在"}, 404)
-        if job.get('user_id') and job['user_id'] != user['id']:
-            return json_response({"error": "无权访问此任务"}, 403)
-        return json_response(job)
-    except Exception as e:
-        logger.error(f"查询任务失败: {str(e)}")
-        return json_response({"error": str(e)}, 500)
-
-
-@app.route('/v1/batch/upload', methods=['POST'])
-@require_admin
-def upload_batch_file():
-    if not ADAPTER:
-        return json_response({"error": "AI服务未配置"}, 500)
-    try:
-        data = request.get_json()
-        requests_data = data.get('requests', [])
-        if not requests_data:
-            return json_response({"error": "请提供 requests 列表"}, 400)
-        result = ADAPTER.upload_and_batch(requests_data)
-        if "error" in result:
-            return json_response(result, 500)
-        return json_response(result)
-    except Exception as e:
-        logger.error(f"上传批处理失败: {str(e)}")
-        return json_response({"error": str(e)}, 500)
-
-
-@app.route('/v1/batch/files', methods=['GET'])
-@require_admin
-def list_xfyun_files():
-    if not ADAPTER:
-        return json_response({"error": "AI服务未配置"}, 500)
-    try:
-        page = request.args.get('page', 1, type=int)
-        size = request.args.get('size', 20, type=int)
-        result = ADAPTER.list_files(page=page, size=size)
-        if not result:
-            return json_response({"error": "查询文件列表失败"}, 500)
-        return json_response(result)
-    except Exception as e:
-        logger.error(f"查询文件列表失败: {str(e)}")
-        return json_response({"error": str(e)}, 500)
-
-
-@app.route('/v1/batch/files/<file_id>', methods=['GET'])
-@require_admin
-def get_xfyun_file(file_id):
-    if not ADAPTER:
-        return json_response({"error": "AI服务未配置"}, 500)
-    try:
-        result = ADAPTER.get_file_info(file_id)
-        if not result:
-            return json_response({"error": "文件不存在"}, 404)
-        return json_response(result)
-    except Exception as e:
-        logger.error(f"查询文件信息失败: {str(e)}")
-        return json_response({"error": str(e)}, 500)
-
-
-@app.route('/v1/batch/files/<file_id>', methods=['DELETE'])
-@require_admin
-def delete_xfyun_file(file_id):
-    if not ADAPTER:
-        return json_response({"error": "AI服务未配置"}, 500)
-    try:
-        result = ADAPTER.delete_file(file_id)
-        if not result:
-            return json_response({"error": "删除文件失败"}, 500)
-        return json_response(result)
-    except Exception as e:
-        logger.error(f"删除文件失败: {str(e)}")
-        return json_response({"error": str(e)}, 500)
-
-
-@app.route('/v1/batch/batches', methods=['GET'])
-@require_admin
-def list_xfyun_batches():
-    if not ADAPTER:
-        return json_response({"error": "AI服务未配置"}, 500)
-    try:
-        limit = request.args.get('limit', 10, type=int)
-        after = request.args.get('after', None)
-        result = ADAPTER.list_batches(limit=limit, after=after)
-        if not result:
-            return json_response({"error": "查询批处理列表失败"}, 500)
-        data = result.get('data', [])
-        if isinstance(data, list):
-            data.sort(key=lambda b: b.get('created_at', ''), reverse=True)
-            result['data'] = data
-        return json_response(result)
-    except Exception as e:
-        logger.error(f"查询批处理列表失败: {str(e)}")
-        return json_response({"error": str(e)}, 500)
-
-
-@app.route('/v1/batch/batches/<batch_id>', methods=['GET'])
-@require_admin
-def get_xfyun_batch_status(batch_id):
-    if not ADAPTER:
-        return json_response({"error": "AI服务未配置"}, 500)
-    try:
-        result = ADAPTER._get_batch_status(batch_id)
-        if not result:
-            return json_response({"error": "查询批处理状态失败"}, 500)
-        return json_response(result)
-    except Exception as e:
-        logger.error(f"查询批处理状态失败: {str(e)}")
-        return json_response({"error": str(e)}, 500)
-
-
-@app.route('/v1/batch/batches/<batch_id>/results', methods=['GET'])
-@require_admin
-def get_xfyun_batch_results(batch_id):
-    if not ADAPTER:
-        return json_response({"error": "AI服务未配置"}, 500)
-    try:
-        result = ADAPTER._get_batch_results(batch_id)
-        if not result:
-            return json_response({"error": "查询批处理结果失败"}, 500)
-        return json_response(result)
-    except Exception as e:
-        logger.error(f"查询批处理结果失败: {str(e)}", exc_info=True)
-        return json_response({"error": str(e)}, 500)
-
-
-@app.route('/v1/batch/batches/<batch_id>/cancel', methods=['POST'])
-@require_admin
-def cancel_xfyun_batch(batch_id):
-    if not ADAPTER:
-        return json_response({"error": "AI服务未配置"}, 500)
-    try:
-        result = ADAPTER.cancel_batch(batch_id)
-        if not result:
-            return json_response({"error": "取消批处理失败"}, 500)
-        return json_response(result)
-    except Exception as e:
-        logger.error(f"取消批处理失败: {str(e)}")
-        return json_response({"error": str(e)}, 500)
-
-
-# ==================== SSE 实时推送 ====================
-
-_batch_sse_clients = set()
-_batch_sse_lock = threading.Lock()
-
-
-@app.route('/v1/batch/events')
-def batch_sse():
-    token = request.args.get('token', '')
-    auth_header = request.headers.get('Authorization', '')
-    if not token and auth_header.startswith('Bearer '):
-        token = auth_header[7:]
-    if not token:
-        return json_response({"error": "未提供认证Token"}, 401)
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE api_key = ?", (token,)).fetchone()
-    conn.close()
-    if not user or user['role'] != 'admin':
-        return json_response({"error": "未授权"}, 401)
-
-    def generate():
-        last_batches_hash = ''
-        last_files_hash = ''
-        last_stats_hash = ''
-        def _hash(data):
-            return hashlib.md5(json.dumps(data, sort_keys=True, default=str, ensure_ascii=False).encode()).hexdigest()
-        try:
-            batches = ADAPTER.list_batches()
-            if batches:
-                last_batches_hash = _hash(batches)
-                yield f"event: batches_updated\ndata: {json.dumps(batches, ensure_ascii=False)}\n\n"
-            files = ADAPTER.list_files()
-            if files:
-                last_files_hash = _hash(files)
-                yield f"event: files_updated\ndata: {json.dumps(files, ensure_ascii=False)}\n\n"
-        except Exception as e:
-            logger.error(f"SSE 初始数据推送失败: {e}")
-        while True:
-            try:
-                time.sleep(3)
-                batches = ADAPTER.list_batches()
-                if batches:
-                    h = _hash(batches)
-                    if h != last_batches_hash:
-                        last_batches_hash = h
-                        yield f"event: batches_updated\ndata: {json.dumps(batches, ensure_ascii=False)}\n\n"
-                files = ADAPTER.list_files()
-                if files:
-                    h = _hash(files)
-                    if h != last_files_hash:
-                        last_files_hash = h
-                        yield f"event: files_updated\ndata: {json.dumps(files, ensure_ascii=False)}\n\n"
-                yield ": heartbeat\n\n"
-            except GeneratorExit:
-                break
-            except Exception as e:
-                logger.error(f"SSE 轮询异常: {e}")
-                yield f"event: error\ndata: {json.dumps({'message': str(e)}, ensure_ascii=False)}\n\n"
-    return Response(generate(), mimetype='text/event-stream', headers={
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'X-Accel-Buffering': 'no',
-        'Access-Control-Allow-Origin': '*',
-    })
 
 
 @app.route('/health', methods=['GET'])
@@ -4965,11 +5081,11 @@ def _create_proxy_protocol_server(host, port, wsgi_app):
     return _PPThreadedServer(host, port, wsgi_app, handler=_PPHandler)
 
 
-def push_batch_update(data: dict):
+def push_ai_request_update(data: dict):
     try:
-        socketio.emit('batch_update', data, room='admin_batch')
+        socketio.emit('ai_request_update', data, room='admin_ai_requests')
     except Exception as e:
-        logger.error(f"推送批处理更新失败: {e}")
+        logger.error(f"推送AI请求更新失败: {e}")
 
 
 @socketio.on('connect')
@@ -4982,16 +5098,16 @@ def handle_disconnect():
     logger.info(f"WebSocket 客户端断开: {request.sid}")
 
 
-@socketio.on('join_admin_batch')
-def handle_join_admin_batch():
-    join_room('admin_batch')
-    logger.info(f"客户端 {request.sid} 加入管理员批处理房间")
+@socketio.on('join_admin_ai_requests')
+def handle_join_admin_ai_requests():
+    join_room('admin_ai_requests')
+    logger.info(f"客户端 {request.sid} 加入管理员AI请求房间")
     conn = get_db()
     requests = conn.execute(
-        "SELECT * FROM batch_requests ORDER BY created_at DESC LIMIT 100"
+        "SELECT * FROM ai_requests ORDER BY created_at DESC LIMIT 100"
     ).fetchall()
     conn.close()
-    emit('batch_update', {"requests": [dict(r) for r in requests]})
+    emit('ai_request_update', {"requests": [dict(r) for r in requests]})
 
 
 if __name__ == "__main__":
@@ -5040,6 +5156,18 @@ if __name__ == "__main__":
         cleanup_thread = threading.Thread(
             target=run_cleanup_scheduler, daemon=True)
         cleanup_thread.start()
+
+        def run_claim_token_monitor():
+            while True:
+                try:
+                    time.sleep(300)
+                    check_claim_token_expiry_and_notify()
+                except Exception:
+                    pass
+
+        claim_token_thread = threading.Thread(
+            target=run_claim_token_monitor, daemon=True)
+        claim_token_thread.start()
 
         import werkzeug.serving
         original_address_string = werkzeug.serving.WSGIRequestHandler.address_string

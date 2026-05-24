@@ -19,10 +19,25 @@ function docUrl(path: string) {
 function buildCurl(apiKey: string) {
   const key = apiKey || 'your-api-key'
   return [
+    '# 基础对话',
     'curl -X POST `' + docUrl('/v1/chat/completions') + '`  \\',
     '   -H "Content-Type: application/json" \\',
     '   -H "Authorization: Bearer ' + key + '" \\',
-    "   -d '{\"messages\": [{\"role\": \"user\", \"content\": \"你好\"}], \"max_tokens\": 500, \"temperature\": 0.7}' \\",
+    "   -d '{\"messages\": [{\"role\": \"user\", \"content\": \"你好\"}], \"room_id\": \"1\", \"max_tokens\": 500, \"temperature\": 0.7}' \\",
+    '   -k',
+    '',
+    '# 联网搜索（消耗20额外token）',
+    'curl -X POST `' + docUrl('/v1/chat/completions') + '`  \\',
+    '   -H "Content-Type: application/json" \\',
+    '   -H "Authorization: Bearer ' + key + '" \\',
+    "   -d '{\"messages\": [{\"role\": \"user\", \"content\": \"今天的新闻\"}], \"room_id\": \"1\", \"web_search\": true, \"max_tokens\": 500}' \\",
+    '   -k',
+    '',
+    '# 深度思考（额外+1token）',
+    'curl -X POST `' + docUrl('/v1/chat/completions') + '`  \\',
+    '   -H "Content-Type: application/json" \\',
+    '   -H "Authorization: Bearer ' + key + '" \\',
+    "   -d '{\"messages\": [{\"role\": \"user\", \"content\": \"复杂问题分析\"}], \"room_id\": \"1\", \"deep_think\": true, \"max_tokens\": 500}' \\",
     '   -k',
   ].join('\n')
 }
@@ -35,6 +50,8 @@ function buildPython(apiKey: string) {
     'headers = {',
     '    "Authorization": "Bearer ' + (apiKey || 'your-api-key') + '"',
     '}',
+    '',
+    '# 基础对话',
     'data = {',
     '    "messages": [',
     '        {',
@@ -42,8 +59,11 @@ function buildPython(apiKey: string) {
     '            "content": "你好"',
     '        }',
     '    ],',
+    '    "room_id": "1",',
     '    "max_tokens": 500,',
-    '    "temperature": 0.7',
+    '    "temperature": 0.7,',
+    '    "web_search": false,',
+    '    "deep_think": false',
     '}',
     '',
     'response = requests.post(url, headers=headers, json=data)',
@@ -53,15 +73,17 @@ function buildPython(apiKey: string) {
     "    answer = result['choices'][0]['message']['content']",
     "    usage = result['usage']",
     "    print('AI回答:', answer)",
-    "    print('使用Token:', usage.get('use-token', 'N/A'))",
+    "    print('基础Token:', usage.get('base_tokens', 'N/A'))",
+    "    print('联网搜索Token:', usage.get('web_search_tokens', 'N/A'))",
+    "    print('深度思考Token:', usage.get('deep_think_tokens', 'N/A'))",
+    "    print('总消耗Token:', usage.get('use-token', 'N/A'))",
     "    print('剩余Token:', usage.get('token', 'N/A'))",
+    "    print('房间:', result.get('room_id', 'N/A'))",
     "    if 'warning' in result:",
     "        print('⚠️ 警告:', result['warning'])",
     'else:',
     "    err = response.json()",
     "    print('错误:', err.get('error', '未知错误'))",
-    "    if 'warning' in err:",
-    "        print('⚠️ 警告:', err['warning'])",
   ].join('\n')
 }
 
@@ -115,6 +137,9 @@ export default function Dashboard() {
   const [testMessage, setTestMessage] = useState('')
   const [testResponse, setTestResponse] = useState('')
   const [testLoading, setTestLoading] = useState(false)
+  const [testWebSearch, setTestWebSearch] = useState(false)
+  const [testDeepThink, setTestDeepThink] = useState(false)
+  const [testRoomId, setTestRoomId] = useState('1')
   const [spaces, setSpaces] = useState<Space[]>([])
   const [spacesLoading, setSpacesLoading] = useState(false)
   const [selectedSpaceId, setSelectedSpaceId] = useState<number | null>(null)
@@ -362,22 +387,28 @@ export default function Dashboard() {
       const res = await aiApi.chatCompletions(
         [{ role: 'user', content: userMsg }],
         500,
-        selectedSpaceId ?? undefined
+        selectedSpaceId ?? undefined,
+        testRoomId || '1',
+        testWebSearch,
+        testDeepThink
       )
       const answer = res?.choices?.[0]?.message?.content || ''
       const usage = res?.usage || {}
-      const ctxCount = usage['context_messages'] ?? 0
-      const ctxTokens = usage['context_tokens'] ?? 0
+      const features = res?.features || {}
       const formatted = [
         '━━━ AI 回答 ━━━',
         '',
         answer,
         '',
-        '━━━ Token 使用 ━━━',
-        '  使用Token: ' + (usage['use-token'] ?? 'N/A'),
+        '━━━ Token 消耗明细 ━━━',
+        '  room_id: ' + (res?.room_id ?? '1'),
+        '  联网搜索: ' + (features.web_search ? '✅ 是 (+20)' : '❌ 否'),
+        '  深度思考: ' + (features.deep_think ? '✅ 是 (+1)' : '❌ 否'),
+        '  基础Token: ' + (usage['base_tokens'] ?? 'N/A'),
+        '  联网搜索Token: ' + (usage['web_search_tokens'] ?? 0),
+        '  深度思考Token: ' + (usage['deep_think_tokens'] ?? 0),
+        '  总消耗Token: ' + (usage['use-token'] ?? 'N/A'),
         '  剩余Token: ' + (usage['token'] ?? 'N/A'),
-        ctxCount > 0 ? '  历史上下文: ' + ctxCount + '条' : '',
-        ctxTokens > 0 ? '  load: ' + ctxTokens : '',
         res?.warning ? '⚠️ ' + res.warning : '',
       ].filter(Boolean).join('\n')
       setTestResponse(formatted)
@@ -1106,6 +1137,26 @@ export default function Dashboard() {
             <div style={{ display: 'flex', gap: '1rem' }}>
               <div style={{ flex: 1 }}>
                 <div className="form-group">
+                  <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                    <label className="label" style={{ display: 'flex', alignItems: 'center', gap: '0.375rem', cursor: 'pointer', marginBottom: 0 }}>
+                      <input type="checkbox" checked={testWebSearch}
+                        onChange={e => setTestWebSearch(e.target.checked)}
+                        style={{ accentColor: 'var(--primary-500)' }} />
+                      <span style={{ fontSize: '0.8rem' }}>🌐 联网搜索 <span style={{ color: 'var(--warning)', fontSize: '0.7rem' }}>(+20)</span></span>
+                    </label>
+                    <label className="label" style={{ display: 'flex', alignItems: 'center', gap: '0.375rem', cursor: 'pointer', marginBottom: 0 }}>
+                      <input type="checkbox" checked={testDeepThink}
+                        onChange={e => setTestDeepThink(e.target.checked)}
+                        style={{ accentColor: 'var(--primary-500)' }} />
+                      <span style={{ fontSize: '0.8rem' }}>🧠 深度思考 <span style={{ color: 'var(--warning)', fontSize: '0.7rem' }}>(+1)</span></span>
+                    </label>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', marginLeft: 'auto' }}>
+                      <span style={{ fontSize: '0.75rem', color: 'var(--gray-500)' }}>room_id:</span>
+                      <input className="input" type="text" placeholder="1"
+                        value={testRoomId} onChange={e => setTestRoomId(e.target.value)}
+                        style={{ width: '100px', fontFamily: 'monospace', fontSize: '0.75rem', padding: '0.25rem 0.5rem' }} />
+                    </div>
+                  </div>
                   <textarea className="input" rows={3} placeholder={
                     selectedSpaceId ? '输入消息，包含历史上下文发送...' : '请先选择一个空间或创建新空间'
                   }
@@ -1247,7 +1298,7 @@ export default function Dashboard() {
             tagType="admin"
             method="POST"
             title="/v1/chat/completions"
-            desc="创建聊天完成请求，返回AI模型生成的回答。兼容OpenAI格式，支持普通请求。"
+            desc="创建聊天完成请求，返回AI模型生成的回答。兼容OpenAI格式，支持联网搜索和深度思考功能。"
             extraTags={[
               { label: 'POST', type: 'admin', small: true },
               { label: 'application/json', type: 'verified', small: true }
@@ -1263,8 +1314,11 @@ export default function Dashboard() {
                   '      "content": "你的问题"',
                   '    }',
                   '  ],',
+                  '  "room_id": "1",',
                   '  "max_tokens": 500,',
-                  '  "temperature": 0.7',
+                  '  "temperature": 0.7,',
+                  '  "web_search": false,',
+                  '  "deep_think": false',
                   '}',
                 ].join('\n')
               },
@@ -1275,31 +1329,58 @@ export default function Dashboard() {
                   ['messages', 'array', '是', '对话消息列表，支持多轮对话'],
                   ['messages[].role', 'string', '是', '角色: user / assistant / system'],
                   ['messages[].content', 'string', '是', '消息内容'],
+                  ['room_id', 'string', '否', '房间标识，用于隔离对话上下文（默认"1"）'],
                   ['max_tokens', 'int', '否', '最大生成Token数（默认500, 最大4096）'],
                   ['temperature', 'float', '否', '生成温度 (0-2, 默认0.7)'],
+                  ['web_search', 'bool', '否', '启用联网搜索（消耗20额外token, 默认false）'],
+                  ['deep_think', 'bool', '否', '启用深度思考（额外+1token, 默认false）'],
+                  ['stream', 'bool', '否', '流式输出（默认false）'],
                 ]
+              },
+              {
+                label: 'Token消耗规则',
+                code: [
+                  '总消耗 = AI实际消耗Token + 联网搜索Token(20) + 深度思考Token(1)',
+                  '',
+                  '示例计算:',
+                  '  - 基础对话: AI消耗30 token → 总计扣除30',
+                  '  - 联网搜索: AI消耗30 + 联网20 = 总计扣除50',
+                  '  - 深度思考: AI消耗30 + 深度1 = 总计扣除31',
+                  '  - 联网+深度: AI消耗30 + 联网20 + 深度1 = 总计扣除51',
+                ].join('\n')
               },
               {
                 label: '成功响应',
                 code: [
                   '{',
-                  '  "id": "chatcmpl-xxx",',
+                  '  "id": "cmpl-xxx",',
+                  '  "request_id": "req_xxxxxxxxxxxxxxxx",',
                   '  "object": "chat.completion",',
                   '  "created": 1742000000,',
-                  '  "choices": [',
-                  '    {',
-                  '      "index": 0,',
-                  '      "message": {',
-                  '        "role": "assistant",',
-                  '        "content": "回答内容"',
-                  '      },',
-                  '      "finish_reason": "stop"',
-                  '    }',
-                  '  ],',
+                  '  "choices": [{',
+                  '    "index": 0,',
+                  '    "message": {',
+                  '      "role": "assistant",',
+                  '      "content": "回答内容"',
+                  '    },',
+                  '    "finish_reason": "stop"',
+                  '  }],',
                   '  "usage": {',
-                  '    "use-token": 10,',
-                  '    "token": 9990',
-                  '  }',
+                  '    "prompt_tokens": 10,',
+                  '    "completion_tokens": 20,',
+                  '    "total_tokens": 30,',
+                  '    "base_tokens": 5,',
+                  '    "web_search_tokens": 0,',
+                  '    "deep_think_tokens": 0,',
+                  '    "use-token": 30,',
+                  '    "token": 9970,',
+                  '    "space_tokens": 0',
+                  '  },',
+                  '  "features": {',
+                  '    "web_search": false,',
+                  '    "deep_think": false',
+                  '  },',
+                  '  "room_id": "1"',
                   '}',
                 ].join('\n')
               },
