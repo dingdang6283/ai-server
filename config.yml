@@ -1,6 +1,4 @@
-# DingDang Cloud 配置文件
-# 敏感信息可被环境变量覆盖：如 YML_SMTP_PASSWORD=xxx
-# 环境变量优先级高于配置文件
+
 
 app:
   secret_key: ""
@@ -13,7 +11,7 @@ app:
   email_whitelist: ""
 
 smtp:
-  display_name: "DingDang Cloud"
+  display_name: "aicloud"
   sender_email: ""
   username: ""
   password: ""

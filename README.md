@@ -35,25 +35,46 @@ npm install
 
 ### 配置
 
-编辑 `config.yml`：
+#### 1. 后端配置 `config.yml`
 
 ```yaml
-server:
-  port: 8081
-  host: 0.0.0.0
-  secret_key: your-secret-key
+app:
+  secret_key: "your-secret-key"        # Flask 密钥
+  host: "127.0.0.1"                    # 监听地址
+  port: 8081                           # 监听端口
+  proxy_protocol_version: 1            # 代理协议 (0=关闭, 1=HTTP头, 2=PPv2)
+  email_whitelist: ""                  # 邮箱域名白名单，逗号分隔
+
+smtp:
+  display_name: "aicloud"              # 发件人显示名称
+  sender_email: "your@email.com"       # 发件邮箱
+  username: "your@email.com"           # SMTP 用户名
+  password: "your-smtp-password"       # SMTP 密码/授权码
+  server: "smtp.example.com"           # SMTP 服务器
+  port: 465                            # SMTP 端口
+  encryption: "SSL"                    # 加密方式 (SSL/TLS)
 
 api:
-  xfyun_password: your-xfyun-api-key  # 与 xfyun 通信用
-  admin_password: your-admin-password  # 管理员 API Key
-
-email:
-  smtp_host: smtp.example.com
-  smtp_port: 587
-  smtp_user: your-email@example.com
-  smtp_password: your-email-password
-  from_addr: your-email@example.com
+  xfyun_password: "your-xfyun-key"     # 讯飞星火 API Key
 ```
+
+所有字段也支持通过环境变量覆盖（如 `YML_SMTP_PASSWORD` 等）。
+
+#### 2. 前端配置 `frontend/.env`
+
+```env
+VITE_API_HOST=localhost      # API 地址（开发环境）
+VITE_API_PROTOCOL=http       # API 协议
+```
+
+生产环境配置 `frontend/.env.production`：
+
+```env
+API_HOST=your-domain.com     # API 地址（生产环境）
+API_PROTOCOL=https           # API 协议
+```
+
+> 前端连接的后端地址优先级：`.env.production` > `.env` > `vite.config.ts` 中的默认值。
 
 ### 运行
 

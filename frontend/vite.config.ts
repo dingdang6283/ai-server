@@ -9,8 +9,8 @@ export default defineConfig(({ mode }) => {
 
   return {
     define: {
-      __API_HOST__: JSON.stringify(env.API_HOST || 'cloud.ai-dingdang.fucku.top'),
-      __API_PROTOCOL__: JSON.stringify(env.API_PROTOCOL || 'https'),
+      __API_HOST__: JSON.stringify(env.API_HOST || 'localhost'),
+      __API_PROTOCOL__: JSON.stringify(env.API_PROTOCOL || 'http'),
     },
     plugins: [
       react(),
