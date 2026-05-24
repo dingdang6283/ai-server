@@ -1,0 +1,25 @@
+# DingDang Cloud 配置文件
+# 敏感信息可被环境变量覆盖：如 YML_SMTP_PASSWORD=xxx
+# 环境变量优先级高于配置文件
+
+app:
+  secret_key: ""
+  host: "127.0.0.1"
+  port: 8081
+  # 代理协议版本: 0=不使用, 1=解析HTTP头部(X-Forwarded-For/X-Real-IP), 2=解析socket级Proxy Protocol v2
+  proxy_protocol_version: 1
+  # 企业邮箱白名单（逗号分隔的域名列表，为空则不限制）
+  # 环境变量: YML_EMAIL_WHITELIST=company.com,example.org
+  email_whitelist: ""
+
+smtp:
+  display_name: "DingDang Cloud"
+  sender_email: ""
+  username: ""
+  password: ""
+  server: ""
+  port: 465
+  encryption: "SSL"
+
+api:
+  xfyun_password: ""
