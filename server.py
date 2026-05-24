@@ -2682,8 +2682,9 @@ def send_notification_email(to_email: str, subject: str, body: str,
                 (claim_token_str, user_id, notification_id, token_amount, expires_at))
             conn.commit()
             conn.close()
-            base_url = CFG['frontend'].get('base_url', 'http://localhost:8081')
-            claim_url = f"{base_url}/claim-token/{claim_token_str}"
+            protocol = CFG['frontend'].get('api_protocol', 'https')
+            host = CFG['frontend'].get('api_host', 'localhost')
+            claim_url = f"{protocol}://{host}/claim-token/{claim_token_str}"
             logger.info(f"[Token发放] 已生成领取链接: {claim_url} (有效期至 {expires_at})")
 
         if os.path.exists(template_path):
