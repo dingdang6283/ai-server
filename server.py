@@ -2767,7 +2767,8 @@ def polish_with_ai(text: str, style: str = 'formal') -> str:
             'friendly': '请将以下内容润色为亲切、友好的风格，保持原意不变，仅返回润色后的结果：\n',
         }
         prefix = style_prompt.get(style, style_prompt['formal'])
-        response = ADAPTER.process_prompt(prefix + text, "qwen", 500, 0.7)
+        messages = [{"role": "user", "content": prefix + text}]
+        response = ADAPTER.process_prompt(messages, "qwen", 500, 0.7)
         if "error" not in response and response.get("choices"):
             result = response["choices"][0]["text"].strip()
             return result if result else text
@@ -4104,6 +4105,20 @@ class XunfeiBatchAdapter:
                        system_message: str = None) -> Dict:
         file_path = None
         try:
+            if isinstance(messages, str):
+                messages = [{"role": "user", "content": messages}]
+            elif not isinstance(messages, list):
+                messages = [{"role": "user", "content": str(messages)}]
+            normalized = []
+            for m in messages:
+                if isinstance(m, str):
+                    normalized.append({"role": "user", "content": m})
+                elif isinstance(m, dict):
+                    c = m.get('content', '')
+                    if isinstance(c, bytes):
+                        c = c.decode('utf-8')
+                    normalized.append({"role": m.get('role', 'user'), "content": c})
+            messages = normalized
             prompt_preview = ""
             for msg in messages:
                 c = msg.get('content', '')
@@ -4405,6 +4420,8 @@ def perform_web_search(query: str, max_results: int = 5) -> str:
 
 
 def sanitize_messages(messages: list) -> list:
+    if not isinstance(messages, list):
+        return messages if isinstance(messages, list) else []
     cleaned = []
     injection_patterns = [
         r'(?i)(?:忽略|忽略|无视|不要管|ignore|forget|disregard|overwrite)\s*(?:上述|以上|之前|前面|previous|above|all)\s*(?:指令|指示|要求|内容|instructions|context|prompt)',
@@ -4414,8 +4431,13 @@ def sanitize_messages(messages: list) -> list:
         r'(?i)(?:用.{0,20}(?:语|语言|language)\s*(?:回答|输出|回复|respond|answer|output))',
     ]
     for msg in messages:
+        if isinstance(msg, str):
+            cleaned.append({"role": "user", "content": msg})
+            continue
+        if not isinstance(msg, dict):
+            continue
         content = msg.get('content', '')
-        role = msg.get('role', '')
+        role = msg.get('role', 'user')
         if isinstance(content, bytes):
             content = content.decode('utf-8')
         if role == 'user' and isinstance(content, str):
@@ -4426,7 +4448,11 @@ def sanitize_messages(messages: list) -> list:
 
 
 def build_messages_with_features(messages: list, web_search: bool, deep_think: bool) -> list:
+    if not isinstance(messages, list):
+        messages = [{"role": "user", "content": str(messages)}]
     messages = sanitize_messages(messages)
+    if not messages:
+        messages = [{"role": "user", "content": "你好"}]
     modified = list(messages)
 
     now = datetime.now()
