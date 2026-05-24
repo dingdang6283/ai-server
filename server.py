@@ -3889,6 +3889,41 @@ def admin_cleanup_batch_requests():
     return json_response({"message": f"已清理 {deleted} 条过期记录"})
 
 
+# ==================== 讯飞批处理代理路由 ====================
+
+@app.route('/v1/batch/files', methods=['GET'])
+def proxy_list_files():
+    if not ADAPTER:
+        return json_response({"error": "讯飞批处理未配置"}, 503)
+    page = request.args.get('page', 1, type=int)
+    size = request.args.get('size', 20, type=int)
+    try:
+        url = f"{ADAPTER.base_url}/v1/files"
+        resp = ADAPTER.session.get(url, params={'page': page, 'size': size}, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list):
+                return json_response({"object": "list", "data": data})
+            return json_response(data), resp.status_code
+        return json_response({"error": "获取文件列表失败", "detail": resp.text[:500]}, resp.status_code)
+    except Exception as e:
+        logger.error(f"获取文件列表失败: {e}")
+        return json_response({"error": f"获取文件列表失败: {str(e)}"}, 500)
+
+
+@app.route('/v1/batch/files/<file_id>', methods=['DELETE'])
+def proxy_delete_file(file_id):
+    if not ADAPTER:
+        return json_response({"error": "讯飞批处理未配置"}, 503)
+    try:
+        url = f"{ADAPTER.base_url}/v1/files/{file_id}"
+        resp = ADAPTER.session.delete(url, timeout=10)
+        return json_response(resp.json()), resp.status_code
+    except Exception as e:
+        logger.error(f"删除文件失败: {e}")
+        return json_response({"error": f"删除文件失败: {str(e)}"}, 500)
+
+
 # ==================== 讯飞批处理适配器 ====================
 
 class XunfeiBatchAdapter:
