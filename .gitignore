@@ -6,7 +6,7 @@ __pycache__/
 *.db
 *.db-shm
 *.db-wal
-
+*.pdf
 # 环境
 .venv
 venv/
@@ -26,7 +26,7 @@ Thumbs.db
 
 # 临时报告
 pentest_report_*.md
-
+COMMIT_EDITMSG
 # IDE
 .trae/
 .idea/
