@@ -1208,29 +1208,31 @@ def validate_user_status(user: Dict):
 
 def deduct_tokens(user_id: int, tokens: int, space_id: int = None) -> dict:
     conn = get_db()
-    if space_id:
-        conn.execute(
-            "UPDATE user_spaces SET tokens = MAX(tokens - ?, 0), "
-            "updated_at = datetime('now') WHERE id = ? AND user_id = ?",
-            (tokens, space_id, user_id))
-        space = conn.execute(
-            "SELECT tokens FROM user_spaces WHERE id = ?",
-            (space_id,)).fetchone()
-        space_remaining = space['tokens'] if space else 0
-        remaining = conn.execute(
-            "SELECT remaining_tokens FROM users WHERE id = ?",
-            (user_id,)).fetchone()['remaining_tokens']
-    else:
-        conn.execute(
-            "UPDATE users SET remaining_tokens = MAX(remaining_tokens - ?, 0), "
-            "updated_at = datetime('now') WHERE id = ?",
-            (tokens, user_id))
-        remaining = conn.execute(
-            "SELECT remaining_tokens FROM users WHERE id = ?",
-            (user_id,)).fetchone()['remaining_tokens']
-        space_remaining = 0
-    conn.commit()
-    conn.close()
+    try:
+        if space_id:
+            conn.execute(
+                "UPDATE user_spaces SET tokens = MAX(tokens - ?, 0), "
+                "updated_at = datetime('now') WHERE id = ? AND user_id = ?",
+                (tokens, space_id, user_id))
+            space = conn.execute(
+                "SELECT tokens FROM user_spaces WHERE id = ? AND user_id = ?",
+                (space_id, user_id)).fetchone()
+            space_remaining = space['tokens'] if space else 0
+            remaining = conn.execute(
+                "SELECT remaining_tokens FROM users WHERE id = ?",
+                (user_id,)).fetchone()['remaining_tokens']
+        else:
+            conn.execute(
+                "UPDATE users SET remaining_tokens = MAX(remaining_tokens - ?, 0), "
+                "updated_at = datetime('now') WHERE id = ?",
+                (tokens, user_id))
+            remaining = conn.execute(
+                "SELECT remaining_tokens FROM users WHERE id = ?",
+                (user_id,)).fetchone()['remaining_tokens']
+            space_remaining = 0
+        conn.commit()
+    finally:
+        conn.close()
     return {"remaining_tokens": remaining, "space_tokens": space_remaining}
 
 # ==================== 邮箱服务 ====================
@@ -4593,18 +4595,18 @@ def calculate_tokens(text: str) -> int:
         return 0
     config = get_token_config_values()
     chinese_chars = 0
-    english_chars = 0
+    english_letters = 0
     other_chars = 0
     for char in text:
         if '\u4e00' <= char <= '\u9fff':
             chinese_chars += 1
-        elif char.isascii():
-            english_chars += 1
+        elif char.isascii() and (char.isalnum() or char == '_'):
+            english_letters += 1
         else:
             other_chars += 1
     tokens = int(
         (chinese_chars / config['chinese_ratio']) +
-        (english_chars / config['english_ratio']) +
+        (english_letters / config['english_ratio']) +
         (other_chars / config['other_ratio']) +
         0.5)
     return max(tokens, 1)
@@ -5058,12 +5060,12 @@ def chat_completions():
             if remaining_tokens <= 10 and remaining_tokens > 0:
                 warnings.append(f"Token即将用完，剩余仅{remaining_tokens}")
             if remaining_tokens <= 0:
+                if total_deduct > 0:
+                    if space_id:
+                        warnings.append("本次请求已消耗全部剩余空间Token")
+                    else:
+                        warnings.append("本次请求已消耗全部剩余Token")
                 warnings.append("Token已用完，后续请求将被拒绝")
-            if remaining_tokens <= 0 and total_deduct > 0:
-                if space_id:
-                    warnings.append("本次请求已消耗全部剩余空间Token")
-                else:
-                    warnings.append("本次请求已消耗全部剩余Token")
 
             chat_response = {
                 "id": response_id,
@@ -5082,8 +5084,8 @@ def chat_completions():
                     "base_tokens": base_tokens,
                     "web_search_tokens": web_search_tokens,
                     "deep_think_tokens": deep_think_tokens,
-                    "use-token": total_deduct,
-                    "token": remaining_tokens,
+                    "used_tokens": total_deduct,
+                    "remaining_tokens": remaining_tokens,
                     "space_tokens": space_tokens
                 },
                 "features": {
@@ -5185,7 +5187,7 @@ def completions():
 
         try:
             messages = [{"role": "user", "content": prompt}]
-            enhanced_messages = build_messages_with_features(messages, web_search, deep_think)
+            enhanced_messages = build_messages_with_features(messages, web_search, deep_think, search_rounds=1)
             response = ADAPTER.process_prompt(
                 enhanced_messages, model, max_tokens, temperature)
             if "error" in response:
@@ -5205,10 +5207,12 @@ def completions():
             remaining_tokens = deduct_result['remaining_tokens']
 
             warnings = []
-            if remaining_tokens <= 10:
-                warnings.append(f"Token即将用完，剩余仅{remaining_tokens}")
+            if remaining_tokens <= 10 and remaining_tokens > 0:
+                warnings.append(f"Token 即将用完，剩余仅{remaining_tokens}")
             if remaining_tokens <= 0:
-                warnings.append("Token已用完，后续请求将被拒绝")
+                if total_deduct > 0:
+                    warnings.append("本次请求已消耗全部剩余 Token")
+                warnings.append("Token 已用完，后续请求将被拒绝")
 
             conn = get_db()
             conn.execute(
@@ -5229,8 +5233,8 @@ def completions():
             response["usage"]["base_tokens"] = base_tokens
             response["usage"]["web_search_tokens"] = web_search_tokens
             response["usage"]["deep_think_tokens"] = deep_think_tokens
-            response["usage"]["use-token"] = total_deduct
-            response["usage"]["token"] = remaining_tokens
+            response["usage"]["used_tokens"] = total_deduct
+            response["usage"]["remaining_tokens"] = remaining_tokens
             response["features"] = {
                 "web_search": web_search,
                 "deep_think": deep_think
