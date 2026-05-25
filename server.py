@@ -2766,14 +2766,47 @@ def polish_with_ai(text: str, style: str = 'formal') -> str:
     if not ADAPTER:
         return text
     try:
-        style_prompt = {
-            'formal': '请将以下内容润色为正式、专业的风格，保持原意不变，仅返回润色后的结果：\n',
-            'concise': '请将以下内容润色为简洁、精炼的风格，保持原意不变，仅返回润色后的结果：\n',
-            'friendly': '请将以下内容润色为亲切、友好的风格，保持原意不变，仅返回润色后的结果：\n',
+        style_prompts = {
+            'formal': '''你是一位专业的文案编辑专家。请润色以下内容，使其更加正式、专业：
+- 保持原意不变
+- 使用规范的书面语
+- 优化句子结构，使其更流畅
+- 修正语法和用词错误
+- 仅返回润色后的结果，不要解释
+
+待润色内容：
+''',
+            'concise': '''你是一位精简写作专家。请润色以下内容，使其更加简洁、精炼：
+- 删除冗余词汇和重复表达
+- 保留核心信息
+- 使用简短句式
+- 让表达更直接有力
+- 仅返回润色后的结果，不要解释
+
+待润色内容：
+''',
+            'friendly': '''你是一位亲切的沟通专家。请润色以下内容，使其更加亲切、友好：
+- 使用温和、亲切的语气
+- 增加人情味和温度
+- 保持专业但不生硬
+- 让读者感到被尊重和理解
+- 仅返回润色后的结果，不要解释
+
+待润色内容：
+''',
+            'natural': '''你是一位自然写作专家。请润色以下内容，使其更加自然、流畅：
+- 避免机器翻译腔
+- 使用地道的表达方式
+- 让文字读起来像真人写的
+- 保持口语化但不失专业
+- 仅返回润色后的结果，不要解释
+
+待润色内容：
+''',
         }
-        prefix = style_prompt.get(style, style_prompt['formal'])
+        prefix = style_prompts.get(style, style_prompts['natural'])
         messages = [{"role": "user", "content": prefix + text}]
-        response = ADAPTER.process_prompt(messages, "qwen", 500, 0.7)
+        response = ADAPTER.process_prompt(messages, "qwen", 800, 0.8)
         if "error" not in response and response.get("choices"):
             result = response["choices"][0]["text"].strip()
             return result if result else text
@@ -3906,6 +3939,203 @@ def admin_cleanup_batch_requests():
 
 
 # ==================== 讯飞批处理代理路由 ====================
+
+@app.route('/v1/batch/jobs', methods=['POST'])
+@require_auth
+def create_batch_job():
+    user = request.current_user
+    data = request.get_json()
+    
+    messages = data.get('messages', [])
+    model = data.get('model', 'qwen')
+    max_tokens = data.get('max_tokens', 500)
+    temperature = data.get('temperature', 0.7)
+    
+    if not messages:
+        return json_response({"error": "消息列表不能为空"}, 400)
+    
+    if not ADAPTER:
+        return json_response({"error": "讯飞批处理未配置"}, 503)
+    
+    job_id = f"job_{uuid.uuid4().hex[:16]}"
+    prompt_text = ""
+    for msg in messages:
+        c = msg.get('content', '')
+        if isinstance(c, bytes):
+            c = c.decode('utf-8')
+        prompt_text += c
+    
+    conn = get_db()
+    conn.execute('''
+        INSERT INTO batch_requests (user_id, username, job_id, model, prompt, 
+            prompt_tokens, status)
+        VALUES (?, ?, ?, ?, ?, ?, 'queued')
+    ''', (user['id'], user['username'], job_id, model, prompt_text[:2000],
+          calculate_tokens(prompt_text)))
+    conn.commit()
+    conn.close()
+    
+    logger.info(f"创建批处理任务：job_id={job_id}, user_id={user['id']}, model={model}")
+    
+    push_batch_update({
+        "type": "create",
+        "request": {
+            "job_id": job_id,
+            "user_id": user['id'],
+            "username": user['username'],
+            "model": model,
+            "prompt": prompt_text[:500],
+            "status": "queued"
+        }
+    })
+    
+    return json_response({
+        "job_id": job_id,
+        "status": "queued",
+        "message": "批处理任务已创建"
+    })
+
+
+@app.route('/v1/batch/jobs', methods=['GET'])
+@require_auth
+def list_batch_jobs():
+    user = request.current_user
+    limit = request.args.get('limit', 10, type=int)
+    limit = max(1, min(100, limit))
+    
+    conn = get_db()
+    if user['role'] == 'admin':
+        requests = conn.execute(
+            "SELECT * FROM batch_requests ORDER BY created_at DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+    else:
+        requests = conn.execute(
+            "SELECT * FROM batch_requests WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+            (user['id'], limit)
+        ).fetchall()
+    conn.close()
+    
+    return json_response({
+        "object": "list",
+        "data": [dict(r) for r in requests]
+    })
+
+
+@app.route('/v1/batch/jobs/<job_id>', methods=['GET'])
+@require_auth
+def get_batch_job(job_id):
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM batch_requests WHERE job_id = ?",
+        (job_id,)
+    ).fetchone()
+    conn.close()
+    
+    if not row:
+        return json_response({"error": "任务不存在"}, 404)
+    
+    return json_response(dict(row))
+
+
+@app.route('/v1/batch/batches', methods=['GET'])
+@require_auth
+def list_batches():
+    limit = request.args.get('limit', 10, type=int)
+    limit = max(1, min(100, limit))
+    
+    conn = get_db()
+    batches = conn.execute(
+        "SELECT DISTINCT xfyun_batch_id, status, created_at FROM batch_requests "
+        "WHERE xfyun_batch_id IS NOT NULL ORDER BY created_at DESC LIMIT ?",
+        (limit,)
+    ).fetchall()
+    conn.close()
+    
+    return json_response({
+        "object": "list",
+        "data": [dict(b) for b in batches]
+    })
+
+
+@app.route('/v1/batch/batches/<batch_id>', methods=['GET'])
+@require_auth
+def get_batch_status(batch_id):
+    conn = get_db()
+    batch_requests = conn.execute(
+        "SELECT * FROM batch_requests WHERE xfyun_batch_id = ? ORDER BY created_at",
+        (batch_id,)
+    ).fetchall()
+    conn.close()
+    
+    if not batch_requests:
+        return json_response({"error": "批处理不存在"}, 404)
+    
+    first = dict(batch_requests[0])
+    statuses = [r['status'] for r in batch_requests]
+    
+    if all(s == 'completed' for s in statuses):
+        overall_status = 'completed'
+    elif any(s == 'failed' for s in statuses):
+        overall_status = 'failed'
+    elif any(s == 'processing' for s in statuses):
+        overall_status = 'processing'
+    else:
+        overall_status = 'queued'
+    
+    return json_response({
+        "id": batch_id,
+        "status": overall_status,
+        "requests": [dict(r) for r in batch_requests]
+    })
+
+
+@app.route('/v1/batch/batches/<batch_id>/results', methods=['GET'])
+@require_auth
+def get_batch_results(batch_id):
+    conn = get_db()
+    batch_requests = conn.execute(
+        "SELECT * FROM batch_requests WHERE xfyun_batch_id = ? ORDER BY created_at",
+        (batch_id,)
+    ).fetchall()
+    conn.close()
+    
+    if not batch_requests:
+        return json_response({"error": "批处理不存在"}, 404)
+    
+    return json_response({
+        "batch_id": batch_id,
+        "status": batch_requests[0]['status'],
+        "requests": [dict(r) for r in batch_requests],
+        "responses": [
+            {"job_id": r['job_id'], "result": r['result'], "error": r['error']}
+            for r in batch_requests
+        ]
+    })
+
+
+@app.route('/v1/batch/batches/<batch_id>/cancel', methods=['POST'])
+@require_auth
+def cancel_batch(batch_id):
+    conn = get_db()
+    conn.execute(
+        "UPDATE batch_requests SET status = 'failed', error = ? "
+        "WHERE xfyun_batch_id = ? AND status IN ('queued', 'processing')",
+        ("用户取消", batch_id)
+    )
+    deleted = conn.total_changes
+    conn.commit()
+    conn.close()
+    
+    if deleted > 0:
+        push_batch_update({
+            "type": "cancel",
+            "batch_id": batch_id
+        })
+        return json_response({"message": f"已取消 {deleted} 个任务"})
+    else:
+        return json_response({"error": "没有可取消的任务"}, 400)
+
 
 @app.route('/v1/batch/files', methods=['GET'])
 def proxy_list_files():
@@ -5183,13 +5413,32 @@ def handle_disconnect():
 @socketio.on('join_admin_ai_requests')
 def handle_join_admin_ai_requests():
     join_room('admin_ai_requests')
-    logger.info(f"客户端 {request.sid} 加入管理员AI请求房间")
+    logger.info(f"客户端 {request.sid} 加入管理员 AI 请求房间")
     conn = get_db()
     requests = conn.execute(
         "SELECT * FROM ai_requests ORDER BY created_at DESC LIMIT 100"
     ).fetchall()
     conn.close()
     emit('ai_request_update', {"requests": [dict(r) for r in requests]})
+
+
+@socketio.on('join_admin_batch')
+def handle_join_admin_batch():
+    join_room('admin_batch')
+    logger.info(f"客户端 {request.sid} 加入管理员批处理房间")
+    conn = get_db()
+    requests = conn.execute(
+        "SELECT * FROM batch_requests ORDER BY created_at DESC LIMIT 100"
+    ).fetchall()
+    conn.close()
+    emit('batch_update', {"requests": [dict(r) for r in requests]})
+
+
+def push_batch_update(data: dict):
+    try:
+        socketio.emit('batch_update', data, room='admin_batch')
+    except Exception as e:
+        logger.error(f"推送批处理更新失败：{e}")
 
 
 if __name__ == "__main__":
