@@ -98,10 +98,10 @@ $ ./start.sh
 $ ./start.sh status
 [SUCCESS] 服务运行中 (PID: 12345)
     PID    PPID USER     %CPU %MEM ELAPSED           COMMAND
-  12345    1234 dingdang  2.5  1.2 01:23:45   python3 server.py
+  12345    1234 user      2.5  1.2 01:23:45   python3 server.py
 
 [INFO] 最近日志:
-2026-05-25 21:57:00 INFO: Server started on http://127.0.0.1:8081
+2026-01-01 00:00:00 INFO: Server started on http://127.0.0.1:8081
 ```
 
 ---
@@ -463,4 +463,4 @@ MIT
 
 ---
 
-**最后更新**: 2026-05-25
+**最后更新**: 2026-01-01
