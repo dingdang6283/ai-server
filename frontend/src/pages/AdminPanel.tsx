@@ -979,13 +979,15 @@ function IpMonitorTab({ showToast }: { showToast: any }) {
 function BatchManagementTab({ showToast, showLoading, closeToast }: { showToast: any; showLoading: any; closeToast: any }) {
   const [requests, setRequests] = useState<BatchRequest[]>([])
   const [files, setFiles] = useState<any[]>([])
-  const [activeSubTab, setActiveSubTab] = useState<'requests' | 'files'>('requests')
+  const [activeSubTab, setActiveSubTab] = useState<'requests' | 'files' | 'settings'>('requests')
   const [selectedRequest, setSelectedRequest] = useState<BatchRequest | null>(null)
   const [connected, setConnected] = useState(false)
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'polling'>('connecting')
   const socketRef = useRef<Socket | null>(null)
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const mountedRef = useRef(true)
+  const [autoDeleteDays, setAutoDeleteDays] = useState(30)
+  const [settingsLoading, setSettingsLoading] = useState(false)
 
   useEffect(() => {
     return () => { mountedRef.current = false }
@@ -1217,47 +1219,153 @@ function BatchManagementTab({ showToast, showLoading, closeToast }: { showToast:
                 <button className="btn btn-secondary btn-sm" onClick={() => setSelectedRequest(null)}>关闭</button>
               </div>
               <div style={{ fontSize: '0.75rem' }}>
-                <p><strong>用户:</strong> {selectedRequest.username} (ID: {selectedRequest.user_id})</p>
-                <p><strong>模型:</strong> {selectedRequest.model}</p>
-                <p><strong>状态:</strong> {statusTag(selectedRequest.status)}</p>
-                <p><strong>创建时间:</strong> {formatDateTime(selectedRequest.created_at)}</p>
-                <p><strong>更新时间:</strong> {formatDateTime(selectedRequest.updated_at)}</p>
-                <div style={{ marginTop: '0.5rem' }}>
-                  <strong>用户输入:</strong>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '0.5rem', marginBottom: '1rem' }}>
+                  <div>
+                    <p><strong>用户:</strong> {selectedRequest.username} (ID: {selectedRequest.user_id})</p>
+                    <p><strong>模型:</strong> {selectedRequest.model}</p>
+                    <p><strong>状态:</strong> {statusTag(selectedRequest.status)}</p>
+                  </div>
+                  <div>
+                    <p><strong>创建时间:</strong> {formatDateTime(selectedRequest.created_at)}</p>
+                    <p><strong>更新时间:</strong> {formatDateTime(selectedRequest.updated_at)}</p>
+                    {selectedRequest.xfyun_batch_id && (
+                      <p><strong>讯飞批次:</strong> {selectedRequest.xfyun_batch_id}</p>
+
+      ) : activeSubTab === 'settings' ? (
+        <div style={{ maxWidth: 800 }}>
+          <div className="card" style={{ marginBottom: '1rem' }}>
+            <h3 style={{ margin: '0 0 1rem 0', fontSize: '1rem' }}>🗂️ 文件管理规则</h3>
+            
+            <div style={{ marginBottom: '1.5rem' }}>
+              <label style={{ display: 'block', fontWeight: 600, marginBottom: '0.5rem' }}>
+                自动删除规则
+              </label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                <input
+                  type="number"
+                  min="1"
+                  max="365"
+                  value={autoDeleteDays}
+                  onChange={(e) => setAutoDeleteDays(parseInt(e.target.value) || 30)}
+                  style={{
+                    width: 80,
+                    padding: '0.5rem',
+                    borderRadius: '4px',
+                    border: '1px solid var(--gray-300)',
+                    fontSize: '0.875rem'
+                  }}
+                />
+                <span>天后自动删除批处理记录</span>
+                <button
+                  className="btn btn-primary"
+                  onClick={async () => {
+                    setSettingsLoading(true)
+                    try {
+                      await fetch('/api/admin/batch-settings', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ auto_delete_days: autoDeleteDays })
+                      })
+                      showToast('设置已保存', 'success')
+                    } catch (err: any) {
+                      showToast(err.message || '保存失败', 'error')
+                    } finally {
+                      setSettingsLoading(false)
+                    }
+                  }}
+                  disabled={settingsLoading}
+                >
+                  {settingsLoading ? '保存中...' : '保存设置'}
+                </button>
+              </div>
+              <p style={{ fontSize: '0.75rem', color: 'var(--gray-500)', marginTop: '0.5rem' }}>
+                ℹ️ 系统会自动清理超过设定天数的批处理记录，保持数据库整洁
+              </p>
+            </div>
+            
+            <div style={{ borderTop: '1px solid var(--gray-200)', paddingTop: '1rem' }}>
+              <h4 style={{ margin: '0 0 0.5rem 0', fontSize: '0.875rem' }}>📊 当前统计</h4>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.5rem' }}>
+                <div style={{ padding: '0.75rem', background: 'rgba(59,130,246,0.1)', borderRadius: '4px' }}>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--gray-500)' }}>总记录数</div>
+                  <div style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--info)' }}>{requests.length}</div>
+                </div>
+                <div style={{ padding: '0.75rem', background: 'rgba(34,197,94,0.1)', borderRadius: '4px' }}>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--gray-500)' }}>文件数量</div>
+                  <div style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--success)' }}>{files.length}</div>
+                </div>
+                <div style={{ padding: '0.75rem', background: 'rgba(245,158,11,0.1)', borderRadius: '4px' }}>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--gray-500)' }}>清理周期</div>
+                  <div style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--warning)' }}>{autoDeleteDays}天</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <div className="card">
+            <h4 style={{ margin: '0 0 0.5rem 0', fontSize: '0.875rem' }}>💡 使用说明</h4>
+            <ul style={{ fontSize: '0.75rem', color: 'var(--gray-600)', margin: 0, paddingLeft: '1.25rem' }}>
+              <li>批处理记录会永久保存，除非手动删除或超过自动清理期限</li>
+              <li>文件列表中的文件可以被删除，但请确保没有正在进行的批处理任务使用该文件</li>
+              <li>自动清理任务会在每天凌晨自动执行</li>
+              <li>可以在"批处理记录"标签页查看用户的详细提问和 AI 回复</li>
+            </ul>
+          </div>
+        </div>
+                    )}
+                  </div>
+                </div>
+                
+                <div style={{ marginBottom: '1rem' }}>
+                  <strong>📄 用户提问（解析文件）:</strong>
                   <div style={{ 
-                    background: 'var(--surface-1)', padding: '0.5rem', 
+                    background: 'var(--surface-1)', padding: '0.75rem', 
                     borderRadius: '4px', marginTop: '0.25rem',
                     whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                    maxHeight: '150px', overflow: 'auto'
+                    maxHeight: '200px', overflow: 'auto',
+                    border: '1px solid var(--primary-500)'
                   }}>
                     {selectedRequest.prompt || '（空）'}
                   </div>
                 </div>
+                
                 {selectedRequest.result && (
-                  <div style={{ marginTop: '0.5rem' }}>
-                    <strong>AI 回复:</strong>
+                  <div style={{ marginBottom: '1rem' }}>
+                    <strong>✅ AI 回复:</strong>
                     <div style={{ 
-                      background: 'var(--surface-1)', padding: '0.5rem', 
+                      background: 'rgba(34,197,94,0.1)', padding: '0.75rem', 
                       borderRadius: '4px', marginTop: '0.25rem',
                       whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                      maxHeight: '200px', overflow: 'auto'
+                      maxHeight: '200px', overflow: 'auto',
+                      border: '1px solid var(--success)'
                     }}>
                       {selectedRequest.result}
                     </div>
                   </div>
                 )}
+                
                 {selectedRequest.error && (
-                  <div style={{ marginTop: '0.5rem' }}>
-                    <strong style={{ color: 'var(--error)' }}>错误信息:</strong>
+                  <div style={{ marginBottom: '1rem' }}>
+                    <strong style={{ color: 'var(--error)' }}>❌ 错误信息:</strong>
                     <div style={{ 
-                      background: 'rgba(239,68,68,0.1)', padding: '0.5rem', 
+                      background: 'rgba(239,68,68,0.1)', padding: '0.75rem', 
                       borderRadius: '4px', marginTop: '0.25rem',
-                      color: 'var(--error)'
+                      color: 'var(--error)',
+                      border: '1px solid var(--error)'
                     }}>
                       {selectedRequest.error}
                     </div>
                   </div>
                 )}
+                
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '0.5rem', marginTop: '1rem' }}>
+                  <div style={{ padding: '0.5rem', background: 'rgba(59,130,246,0.1)', borderRadius: '4px' }}>
+                    <strong>提示 Token:</strong> {selectedRequest.prompt_tokens || 0}
+                  </div>
+                  <div style={{ padding: '0.5rem', background: 'rgba(34,197,94,0.1)', borderRadius: '4px' }}>
+                    <strong>结果 Token:</strong> {selectedRequest.result_tokens || 0}
+                  </div>
+                </div>
               </div>
             </div>
           )}

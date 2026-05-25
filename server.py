@@ -5187,7 +5187,7 @@ def completions():
 
         try:
             messages = [{"role": "user", "content": prompt}]
-            enhanced_messages = build_messages_with_features(messages, web_search, deep_think, search_rounds=1)
+            enhanced_messages = build_messages_with_features(messages, web_search, deep_think)
             response = ADAPTER.process_prompt(
                 enhanced_messages, model, max_tokens, temperature)
             if "error" in response:
