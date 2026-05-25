@@ -5596,7 +5596,6 @@ if __name__ == "__main__":
         werkzeug.serving.WSGIRequestHandler.address_string = patched_address_string
 
             # 启动定时清理任务
-    start_cleanup_scheduler()
 
     socketio.run(app, host=CFG['app']['host'], port=CFG['app']['port'],
                      debug=False, allow_unsafe_werkzeug=True)
