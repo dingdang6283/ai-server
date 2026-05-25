@@ -11,11 +11,13 @@ AI API 适配器管理平台，基于讯飞星火 API 的适配代理层，提�
 - **房间隔离** — 通过 `room_id` 隔离对话上下文，默认值为 "1"
 - **用户系统** — 注册/登录、邮箱验证、密码修改、API Key 管理
 - **空间管理** — 创建独立空间，每个空间可隔离上下文和配额
-- **管理员面板** — 用户/IP/审计日志/AI请求管理
+- **管理员面板** — 用户/IP/审计日志/AI 请求管理
 - **动态 Token** — 支持临时授权链接，可设过期时间
 - **邮件通知** — 验证码、空间邀请等邮件通知
 
-## 快速开始
+---
+
+## 🚀 快速开始
 
 ### 环境要求
 
@@ -23,22 +25,122 @@ AI API 适配器管理平台，基于讯飞星火 API 的适配代理层，提�
 - Node.js 18+
 - SQLite3
 
-### 安装
+### 方法一：自动安装（推荐）
 
 ```bash
-# 后端
-pip install flask requests
+# 1. 运行安装脚本
+bash install.sh
 
-# 前端
-cd frontend
-npm install
+# 2. 编辑配置文件
+cp config.example.yml config.yml
+nano config.yml  # 或使用其他编辑器修改配置
+
+# 3. 启动服务
+./start.sh
 ```
 
-### 配置
+### 方法二：手动安装
 
-#### 1. 后端配置 `config.yml`
+```bash
+# 1. 创建虚拟环境
+python3 -m venv .venv
 
-完整配置参考 [config.yml](config.yml)，主要配置段如下：
+# 2. 激活虚拟环境
+source .venv/bin/activate
+
+# 3. 安装依赖
+pip install -r requirements.txt
+cd frontend && npm install
+
+# 4. 配置应用
+cp config.example.yml config.yml
+# 编辑 config.yml 填入实际配置
+
+# 5. 启动服务
+python3 server.py
+```
+
+---
+
+## 📦 使用启动脚本
+
+### 启动服务
+
+```bash
+# 默认启动（后台运行）
+./start.sh
+
+# 调试模式（前台运行，显示日志）
+./start.sh debug
+
+# 查看服务状态
+./start.sh status
+
+# 停止服务
+./start.sh stop
+
+# 重启服务
+./start.sh restart
+
+# 查看帮助
+./start.sh help
+```
+
+### 输出示例
+
+```bash
+$ ./start.sh
+[INFO] 正在启动 DingDang AI Cloud...
+[SUCCESS] 服务启动成功！(PID: 12345)
+[INFO] 日志文件：logs/server.log
+[INFO] 查看日志：tail -f logs/server.log
+
+$ ./start.sh status
+[SUCCESS] 服务运行中 (PID: 12345)
+    PID    PPID USER     %CPU %MEM ELAPSED           COMMAND
+  12345    1234 dingdang  2.5  1.2 01:23:45   python3 server.py
+
+[INFO] 最近日志:
+2026-05-25 21:57:00 INFO: Server started on http://127.0.0.1:8081
+```
+
+---
+
+## ⚙️ 配置说明
+
+### 环境变量（推荐用于生产环境）
+
+```bash
+# 使用环境变量覆盖配置文件
+export YML_SECRET_KEY="your-secret-key"
+export YML_SMTP_PASSWORD="your-smtp-password"
+export YML_API_XFYUN_PASSWORD="your-api-key"
+
+# 启动服务
+./start.sh
+```
+
+### 配置文件结构
+
+```yaml
+# config.yml
+app:
+  secret_key: "修改为随机字符串"
+  host: "127.0.0.1"
+  port: 8081
+
+smtp:
+  sender_email: "your-email@example.com"
+  password: "your-smtp-password"
+  server: "smtp.example.com"
+
+api:
+  xfyun_password: "your-api-key"
+```
+
+### 完整配置参考
+
+完整配置参考 [config.example.yml](config.example.yml)，主要配置段如下：
 
 ```yaml
 # ---- 应用基础 ----
@@ -46,7 +148,7 @@ app:
   secret_key: "your-secret-key"          # Flask 密钥
   host: "127.0.0.1"                      # 监听地址
   port: 8081                             # 监听端口
-  proxy_protocol_version: 1              # 代理协议 (0=关闭, 1=HTTP头, 2=PPv2)
+  proxy_protocol_version: 1              # 代理协议 (0=关闭，1=HTTP 头，2=PPv2)
   email_whitelist: ""                    # 邮箱域名白名单，逗号分隔
 
 # ---- 邮件服务 ----
@@ -71,10 +173,10 @@ email_templates:
 
 # ---- 前端 ----
 frontend:
-  api_host: "127.0.0.1"                 # API 地址（示例用）
+  api_host: "127.0.0.1"                  # API 地址（示例用）
   api_protocol: "http"                   # API 协议
-  page_title: "DingDang Cloud"          # 浏览器标签页标题
-  site_title: "ai平台"                   # 页面站点名称
+  page_title: "DingDang Cloud"           # 浏览器标签页标题
+  site_title: "ai 平台"                    # 页面站点名称
 
 # ---- 数据库 ----
 database:
@@ -109,24 +211,110 @@ database:
 YML_SMTP_PASSWORD=xxx YML_XFYUN_PASSWORD=xxx python3 server.py
 ```
 
-#### 2. 前端配置（已合并至 config.yml）
+---
 
-前端地址配置已合并到 `config.yml` 的 `frontend` 段，配置注入由后端自动完成。
-不再需要独立的 `.env` 文件。
+## 📝 常见问题
 
-### 运行
+### 1. 虚拟环境不存在
 
 ```bash
-# 安装依赖
-pip install -r requirements.txt
-cd frontend && npm install
+# 运行安装脚本
+bash install.sh
+```
 
-# 启动后端
+### 2. 端口已被占用
+
+```bash
+# 查看占用端口的进程
+lsof -i :8081
+
+# 修改 config.yml 中的端口
+app:
+  port: 8082
+```
+
+### 3. 权限问题
+
+```bash
+# 设置执行权限
+chmod +x install.sh start.sh
+```
+
+### 4. 依赖安装失败
+
+```bash
+# 升级 pip
+source .venv/bin/activate
+pip install --upgrade pip
+
+# 重新安装依赖
+pip install -r requirements.txt
+```
+
+---
+
+## 🔧 开发模式
+
+```bash
+# 激活虚拟环境
+source .venv/bin/activate
+
+# 运行在调试模式
+export FLASK_ENV=development
 python3 server.py
 
-# 启动前端开发模式（可选）
-cd frontend && npx vite --host 0.0.0.0 --port 5173
+# 或使用启动脚本
+./start.sh debug
 ```
+
+---
+
+## 📊 日志管理
+
+```bash
+# 查看实时日志
+tail -f logs/server.log
+
+# 查看最近 100 行
+tail -n 100 logs/server.log
+
+# 搜索错误日志
+grep ERROR logs/server.log
+
+# 清空日志
+> logs/server.log
+```
+
+---
+
+## 🔐 安全建议
+
+1. **首次部署时修改 `secret_key`**
+   ```bash
+   python3 -c "import secrets; print(secrets.token_hex(32))"
+   ```
+
+2. **不要将 `config.yml` 上传到版本控制**
+   - 已添加到 `.gitignore`
+   - 使用 `config.example.yml` 作为模板
+
+3. **使用环境变量存储敏感信息**
+   ```bash
+   YML_SMTP_PASSWORD=xxx ./start.sh
+   ```
+
+4. **配置防火墙**
+   ```bash
+   # 仅允许本地访问
+   app:
+     host: "127.0.0.1"
+   
+   # 或允许所有 IP（需要防火墙保护）
+   app:
+     host: "0.0.0.0"
+   ```
+
+---
 
 ## API 概览
 
@@ -231,6 +419,8 @@ cd frontend && npx vite --host 0.0.0.0 --port 5173
 | GET | `/api/admin/token-config` | Token 配置 |
 | GET | `/api/admin/usage-stats` | 使用统计 |
 
+---
+
 ## 项目结构
 
 ```
@@ -242,22 +432,35 @@ cd frontend && npx vite --host 0.0.0.0 --port 5173
 │   │   ├── components/    # 通用组件
 │   │   └── context/       # React 上下文
 │   └── vite.config.ts     # Vite 配置
-├── config.yml             # 配置文件
+├── install.sh             # 自动安装脚本
+├── start.sh               # 启动脚本
+├── config.example.yml     # 配置示例文件
+├── config.yml             # 实际配置文件（不上传到 Git）
 ├── templates/             # Flask 模板
 └── adapters/              # 适配器模块
 ```
+
+---
 
 ## 变更日志
 
 ### v4.0（重构版）
 - 彻底移除原有的任务管理功能模块
-- 重构核心 AI 请求流程（token计算 → JSON存储 → 唯一ID → 状态管理）
+- 重构核心 AI 请求流程（token 计算 → JSON 存储 → 唯一 ID → 状态管理）
 - 新增联网搜索功能（每次消耗 20 token）
 - 新增深度思考功能（额外增加 1 token）
 - room_id 参数必须传入，默认值为 "1"
 - 移除旧的批处理管理相关 API 路由
 - 数据库使用新的 ai_requests 表替代旧的 batch_requests 和 admin_tasks 表
+- 新增自动安装脚本 `install.sh`
+- 新增启动脚本 `start.sh`
+
+---
 
 ## 许可证
 
 MIT
+
+---
+
+**最后更新**: 2026-05-25

@@ -1,33 +1,82 @@
+# ============================================================
+# DingDang AI Cloud - .gitignore
+# ============================================================
+
 # Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.egg-info/
+.eggs/
+
+# 数据库文件
 *.db
 *.db-shm
 *.db-wal
-*.pdf
-# 环境
-.venv
+*.sqlite
+*.sqlite3
+
+# 虚拟环境
+.venv/
 venv/
-*.env
+ENV/
+env/
+
+# 环境变量文件
+.env
+.env.local
+.env.*.local
+
+# 配置文件（包含敏感信息）
+config.yml
+config.local.yml
+*.secret
 
 # 前端构建产物
 frontend/dist/
 frontend/node_modules/
+frontend/.npm/
 
-# 日志
+# 日志文件
+logs/
 *.log
+
+# PID 文件
+*.pid
 
 # 系统文件
 .DS_Store
 Thumbs.db
 *.pdf
 
+# 临时文件
+*.tmp
+*.bak
+*.swp
+*~
+
 # 临时报告
 pentest_report_*.md
+
+# Git 文件
 COMMIT_EDITMSG
+ORIG_HEAD
+FETCH_HEAD
+
 # IDE
 .trae/
 .idea/
 .vscode/
+*.sublime-project
+*.sublime-workspace
+
+# 测试覆盖率
+htmlcov/
+.coverage
+.coverage.*
+.pytest_cache/
+
+# 构建产物
+build/
+dist/

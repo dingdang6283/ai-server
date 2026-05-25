@@ -1,0 +1,123 @@
+# ============================================================
+# DingDing AI Cloud - 配置示例文件
+# ============================================================
+# 使用说明：
+#   1. 复制此文件为 config.yml
+#   2. 修改下面的配置值
+#   3. 运行 ./start.sh 启动服务
+#
+# 或者使用环境变量（优先级更高）：
+#   YML_SMTP_PASSWORD=xxx python3 server.py
+# ============================================================
+
+
+# ==================== 应用基础配置 ====================
+app:
+  # Flask 密钥 - 用于 session 加密，请修改为随机字符串
+  # 生成方法：python3 -c "import secrets; print(secrets.token_hex(32))"
+  secret_key: "your-secret-key-change-this"
+  
+  # 监听地址
+  host: "127.0.0.1"
+  
+  # 监听端口
+  port: 8081
+  
+  # 代理协议版本 (0=关闭，1=HTTP 头，2=PPv2)
+  proxy_protocol_version: 1
+  
+  # 邮箱域名白名单（逗号分隔，留空表示不限制）
+  # 示例："example.com,test.com"
+  email_whitelist: ""
+
+
+# ==================== SMTP 邮件服务 ====================
+smtp:
+  # 发件人显示名称
+  display_name: "aicloud"
+  
+  # 发件邮箱地址
+  sender_email: "your-email@example.com"
+  
+  # SMTP 用户名
+  username: "your-username"
+  
+  # SMTP 密码/授权码
+  password: "your-smtp-password"
+  
+  # SMTP 服务器地址
+  server: "smtp.example.com"
+  
+  # SMTP 端口
+  port: 465
+  
+  # 加密方式 (SSL/TLS/None)
+  encryption: "SSL"
+
+
+# ==================== 邮件模板路径 ====================
+email_templates:
+  verification: "email.html"           # 验证码模板
+  notification: "notification.html"    # 通知模板
+  token_grant: "token_grant.html"      # Token 授权模板
+
+
+# ==================== API 密钥配置 ====================
+api:
+  # 讯飞星火 API Key
+  # 格式："api_secret:api_key"
+  xfyun_password: "your-xfyun-api-key"
+
+
+# ==================== 前端配置 ====================
+frontend:
+  # API 服务器地址（客户端访问用）
+  api_host: "127.0.0.1"
+  
+  # API 协议
+  api_protocol: "http"
+  
+  # 浏览器标签页标题
+  page_title: "DingDang Cloud"
+  
+  # 页面站点名称
+  site_title: "ai 平台"
+
+
+# ==================== 数据库配置 ====================
+database:
+  # 数据库模式：sqlite / mysql / postgresql / mongodb
+  mode: "sqlite"
+  
+  # 数据存储路径
+  path: "."
+  
+  # SQLite 配置
+  sqlite:
+    filename: "data.db"        # 数据库文件名
+    auto_create: true          # 首次启动自动创建
+  
+  # MySQL 配置（如使用 MySQL 请修改下面配置）
+  mysql:
+    host: "127.0.0.1"
+    port: 3306
+    user: "root"
+    password: ""
+    database: "dingdang_cloud"
+  
+  # PostgreSQL 配置
+  postgresql:
+    host: "127.0.0.1"
+    port: 5432
+    user: "postgres"
+    password: ""
+    database: "dingdang_cloud"
+  
+  # MongoDB 配置
+  mongodb:
+    host: "127.0.0.1"
+    port: 27017
+    user: ""
+    password: ""
+    database: "dingdang_cloud"
+    uri: ""
