@@ -4168,8 +4168,86 @@ def proxy_delete_file(file_id):
         resp = ADAPTER.session.delete(url, timeout=10)
         return json_response(resp.json()), resp.status_code
     except Exception as e:
-        logger.error(f"删除文件失败: {e}")
-        return json_response({"error": f"删除文件失败: {str(e)}"}, 500)
+        logger.error(f"删除文件失败：{e}")
+        return json_response({"error": f"删除文件失败：{str(e)}"}, 500)
+
+
+# ==================== 批处理设置路由 ====================
+
+@app.route('/api/admin/batch-settings', methods=['GET'])
+@require_auth
+def get_batch_settings():
+    user = request.current_user
+    if user['role'] != 'admin':
+        return json_response({"error": "权限不足"}, 403)
+    
+    conn = get_db()
+    row = conn.execute(
+        "SELECT value FROM config WHERE key = 'auto_delete_days'"
+    ).fetchone()
+    conn.close()
+    
+    auto_delete_days = int(row['value']) if row and row['value'] else 30
+    return json_response({
+        "auto_delete_days": auto_delete_days
+    })
+
+
+@app.route('/api/admin/batch-settings', methods=['POST'])
+@require_auth
+def save_batch_settings():
+    user = request.current_user
+    if user['role'] != 'admin':
+        return json_response({"error": "权限不足"}, 403)
+    
+    data = request.get_json()
+    auto_delete_days = data.get('auto_delete_days', 30)
+    
+    if not isinstance(auto_delete_days, int) or auto_delete_days < 1 or auto_delete_days > 365:
+        return json_response({"error": "自动删除天数必须在 1-365 之间"}, 400)
+    
+    conn = get_db()
+    conn.execute('''
+        INSERT OR REPLACE INTO config (key, value, updated_at)
+        VALUES ('auto_delete_days', ?, datetime('now'))
+    ''', (str(auto_delete_days),))
+    conn.commit()
+    conn.close()
+    
+    logger.info(f"更新批处理自动删除设置：{auto_delete_days}天")
+    return json_response({
+        "message": "设置已保存",
+        "auto_delete_days": auto_delete_days
+    })
+
+
+@app.route('/api/admin/batch/cleanup', methods=['POST'])
+@require_auth
+def manual_cleanup():
+    conn = get_db()
+    
+    row = conn.execute(
+        "SELECT value FROM config WHERE key = 'auto_delete_days'"
+    ).fetchone()
+    auto_delete_days = int(row['value']) if row and row['value'] else 30
+    
+    cutoff_date = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=auto_delete_days)
+    
+    result = conn.execute('''
+        DELETE FROM batch_requests
+        WHERE status IN ('completed', 'failed')
+        AND datetime(created_at) < datetime(?)
+    ''', (cutoff_date.isoformat(),))
+    
+    deleted_count = result.rowcount
+    conn.commit()
+    conn.close()
+    
+    logger.info(f"手动清理批处理记录：删除 {deleted_count} 条记录")
+    return json_response({
+        "message": f"已删除 {deleted_count} 条过期记录",
+        "deleted_count": deleted_count
+    })
 
 
 # ==================== 讯飞批处理适配器 ====================
@@ -5517,5 +5595,8 @@ if __name__ == "__main__":
 
         werkzeug.serving.WSGIRequestHandler.address_string = patched_address_string
 
-        socketio.run(app, host=CFG['app']['host'], port=CFG['app']['port'],
+            # 启动定时清理任务
+    start_cleanup_scheduler()
+
+    socketio.run(app, host=CFG['app']['host'], port=CFG['app']['port'],
                      debug=False, allow_unsafe_werkzeug=True)
