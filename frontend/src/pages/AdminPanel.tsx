@@ -1230,7 +1230,13 @@ function BatchManagementTab({ showToast, showLoading, closeToast }: { showToast:
                     <p><strong>更新时间:</strong> {formatDateTime(selectedRequest.updated_at)}</p>
                     {selectedRequest.xfyun_batch_id && (
                       <p><strong>讯飞批次:</strong> {selectedRequest.xfyun_batch_id}</p>
-
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </>
       ) : activeSubTab === 'settings' ? (
         <div style={{ maxWidth: 800 }}>
           <div className="card" style={{ marginBottom: '1rem' }}>
@@ -1312,162 +1318,7 @@ function BatchManagementTab({ showToast, showLoading, closeToast }: { showToast:
             </ul>
           </div>
         </div>
-                    )}
-                  </div>
-                </div>
-                
-                <div style={{ marginBottom: '1rem' }}>
-                  <strong>📄 用户提问（解析文件）:</strong>
-                  <div style={{ 
-                    background: 'var(--surface-1)', padding: '0.75rem', 
-                    borderRadius: '4px', marginTop: '0.25rem',
-                    whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                    maxHeight: '200px', overflow: 'auto',
-                    border: '1px solid var(--primary-500)'
-                  }}>
-                    {selectedRequest.prompt || '（空）'}
-                  </div>
-                </div>
-                
-                {selectedRequest.result && (
-                  <div style={{ marginBottom: '1rem' }}>
-                    <strong>✅ AI 回复:</strong>
-                    <div style={{ 
-                      background: 'rgba(34,197,94,0.1)', padding: '0.75rem', 
-                      borderRadius: '4px', marginTop: '0.25rem',
-                      whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                      maxHeight: '200px', overflow: 'auto',
-                      border: '1px solid var(--success)'
-                    }}>
-                      {selectedRequest.result}
-                    </div>
-                  </div>
-                )}
-                
-                {selectedRequest.error && (
-                  <div style={{ marginBottom: '1rem' }}>
-                    <strong style={{ color: 'var(--error)' }}>❌ 错误信息:</strong>
-                    <div style={{ 
-                      background: 'rgba(239,68,68,0.1)', padding: '0.75rem', 
-                      borderRadius: '4px', marginTop: '0.25rem',
-                      color: 'var(--error)',
-                      border: '1px solid var(--error)'
-                    }}>
-                      {selectedRequest.error}
-                    </div>
-                  </div>
-                )}
-                
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '0.5rem', marginTop: '1rem' }}>
-                  <div style={{ padding: '0.5rem', background: 'rgba(59,130,246,0.1)', borderRadius: '4px' }}>
-                    <strong>提示 Token:</strong> {selectedRequest.prompt_tokens || 0}
-                  </div>
-                  <div style={{ padding: '0.5rem', background: 'rgba(34,197,94,0.1)', borderRadius: '4px' }}>
-                    <strong>结果 Token:</strong> {selectedRequest.result_tokens || 0}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
-            <table style={{ fontSize: '0.75rem', width: '100%', minWidth: 900 }}>
-              <thead>
-                <tr>
-                  <th>用户</th>
-                  <th>Job ID</th>
-                  <th>模型</th>
-                  <th>状态</th>
-                  <th>输入预览</th>
-                  <th>Token</th>
-                  <th>创建时间</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {requests.length === 0 ? (
-                  <tr>
-                    <td colSpan={8} style={{ textAlign: 'center', padding: '2rem', color: 'var(--gray-500)' }}>
-                      暂无批处理记录
-                    </td>
-                  </tr>
-                ) : requests.map((r: any) => (
-                  <tr key={r.id}>
-                    <td>
-                      <span style={{ fontWeight: 600 }}>{r.username}</span>
-                      <span style={{ color: 'var(--gray-500)', fontSize: '0.65rem', marginLeft: '0.25rem' }}>
-                        (#{r.user_id})
-                      </span>
-                    </td>
-                    <td style={{ fontFamily: 'monospace', fontSize: '0.65rem', maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {r.job_id}
-                    </td>
-                    <td>{r.model}</td>
-                    <td>{statusTag(r.status)}</td>
-                    <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {r.prompt || '-'}
-                    </td>
-                    <td>
-                      <span style={{ color: 'var(--info)' }}>{r.prompt_tokens || 0}</span>
-                      {' / '}
-                      <span style={{ color: 'var(--success)' }}>{r.result_tokens || 0}</span>
-                    </td>
-                    <td style={{ fontSize: '0.65rem' }}>{formatDateTime(r.created_at)}</td>
-                    <td>
-                      <button className="btn btn-primary btn-sm"
-                        onClick={() => setSelectedRequest(r)}
-                        style={{ fontSize: '0.65rem', padding: '0.15rem 0.4rem' }}>
-                        详情
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </>
-      ) : (
-        <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
-          <table style={{ fontSize: '0.75rem', width: '100%', minWidth: 600 }}>
-            <thead>
-              <tr>
-                <th>File ID</th>
-                <th>文件名</th>
-                <th>大小</th>
-                <th>用途</th>
-                <th>创建时间</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {files.length === 0 ? (
-                <tr>
-                  <td colSpan={6} style={{ textAlign: 'center', padding: '2rem', color: 'var(--gray-500)' }}>
-                    暂无文件数据
-                  </td>
-                </tr>
-              ) : files.map((f: any, i: number) => (
-                <tr key={f.id || i}>
-                  <td style={{ fontFamily: 'monospace', maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {f.id}
-                  </td>
-                  <td>{f.filename || '-'}</td>
-                  <td>{f.bytes ? (f.bytes / 1024).toFixed(1) + 'KB' : '-'}</td>
-                  <td>{purposeTag(f.purpose)}</td>
-                  <td>{formatTime(f.created_at)}</td>
-                  <td>
-                    <button className="btn btn-danger btn-sm"
-                      onClick={() => handleDeleteFile(f.id)}
-                      style={{ fontSize: '0.65rem', padding: '0.15rem 0.4rem' }}>
-                      删除
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      ) : null}
     </div>
   )
 }

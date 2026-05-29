@@ -246,10 +246,7 @@ export default function LoginPage() {
             千问API 智能中转平台
           </p>
           <p style={{ color: 'var(--gray-500)', fontSize: '0.7rem', marginTop: '0.15rem' }}>
-            <a href="https://github.com/dingdang6283/ai-server" target="_blank" rel="noopener noreferrer"
-              style={{ color: 'inherit', textDecoration: 'none' }}>
-              github.com/dingdang6283/ai-server
-            </a>
+            DingDang Cloud v4.0
           </p>
         </div>
 
