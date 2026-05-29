@@ -236,15 +236,27 @@ export default function Dashboard() {
 
   const handleClaimToken = async (e: React.MouseEvent, n: Notification) => {
     e.stopPropagation()
+    if (n.is_claimed) {
+      showToast('Token 已被领取', 'warning')
+      return
+    }
     try {
       const res = await notificationApi.claim(n.user_notification_id)
       setNotifications(prev => prev.map(item =>
         item.user_notification_id === n.user_notification_id
           ? { ...item, is_claimed: 1 } : item))
       showToast(res.message, 'success')
-      refreshUser()
+      await refreshUser()
+      await loadNotifications()
     } catch (err: any) {
       showToast(err.message || '领取失败', 'error')
+      if (err.message && err.message.includes('已被领取')) {
+        setNotifications(prev => prev.map(item =>
+          item.user_notification_id === n.user_notification_id
+            ? { ...item, is_claimed: 1 } : item))
+        await refreshUser()
+        await loadNotifications()
+      }
     }
   }
 

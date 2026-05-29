@@ -1209,6 +1209,8 @@ def validate_user_status(user: Dict):
 def deduct_tokens(user_id: int, tokens: int, space_id: int = None) -> dict:
     conn = get_db()
     try:
+        conn.execute("BEGIN IMMEDIATE")
+        
         if space_id:
             conn.execute(
                 "UPDATE user_spaces SET tokens = MAX(tokens - ?, 0), "
@@ -1230,10 +1232,18 @@ def deduct_tokens(user_id: int, tokens: int, space_id: int = None) -> dict:
                 "SELECT remaining_tokens FROM users WHERE id = ?",
                 (user_id,)).fetchone()['remaining_tokens']
             space_remaining = 0
+        
         conn.commit()
+        
+        return {"remaining_tokens": remaining, "space_tokens": space_remaining}
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"扣减 Token 失败：{e}")
+        raise
     finally:
         conn.close()
-    return {"remaining_tokens": remaining, "space_tokens": space_remaining}
+
+
 
 # ==================== 邮箱服务 ====================
 
@@ -3066,57 +3076,82 @@ def delete_notification(notification_id):
 def claim_notification(notification_id):
     user = request.current_user
     conn = get_db()
-    notif = conn.execute(
-        "SELECT un.id, an.type, an.token_amount "
-        "FROM user_notifications un "
-        "JOIN admin_notifications an ON un.notification_id = an.id "
-        "WHERE un.id = ? AND un.user_id = ?",
-        (notification_id, user['id'])).fetchone()
-    if not notif:
-        conn.close()
-        return json_response({"error": "通知不存在"}, 404)
-    if notif['type'] != 'token_grant':
-        conn.close()
-        return json_response({"error": "该通知不可领取"}, 400)
-    if notif['token_amount'] <= 0:
-        conn.close()
-        return json_response({"error": "无效的Token数量"}, 400)
-    un_claimed = conn.execute(
-        "SELECT is_claimed FROM user_notifications WHERE id = ?",
-        (notification_id,)).fetchone()
-    if un_claimed and un_claimed['is_claimed']:
-        conn.close()
-        return json_response({"error": "Token已被领取"}, 400)
-    space = conn.execute(
-        "SELECT id FROM user_spaces WHERE user_id = ? AND name = '试用'",
-        (user['id'],)).fetchone()
-    if not space:
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        
+        un_row = conn.execute(
+            "SELECT id, is_claimed, notification_id FROM user_notifications "
+            "WHERE id = ? AND user_id = ?",
+            (notification_id, user['id'])).fetchone()
+        
+        if not un_row:
+            conn.rollback()
+            return json_response({"error": "通知不存在"}, 404)
+        
+        if un_row['is_claimed']:
+            conn.rollback()
+            return json_response({"error": "Token 已被领取"}, 400)
+        
+        notif = conn.execute(
+            "SELECT an.type, an.token_amount "
+            "FROM admin_notifications an "
+            "WHERE an.id = ?",
+            (un_row['notification_id'],)).fetchone()
+        
+        if not notif:
+            conn.rollback()
+            return json_response({"error": "通知不存在"}, 404)
+        if notif['type'] != 'token_grant':
+            conn.rollback()
+            return json_response({"error": "该通知不可领取"}, 400)
+        if notif['token_amount'] <= 0:
+            conn.rollback()
+            return json_response({"error": "无效的 Token 数量"}, 400)
+        
+        space = conn.execute(
+            "SELECT id FROM user_spaces WHERE user_id = ? AND name = '试用'",
+            (user['id'],)).fetchone()
+        if not space:
+            conn.execute(
+                "INSERT INTO user_spaces (user_id, name, description, tokens) "
+                "VALUES (?, '试用', '专属 AI 试用空间', ?)",
+                (user['id'], notif['token_amount']))
+            conn.execute(
+                "UPDATE users SET remaining_tokens = remaining_tokens + ? "
+                "WHERE id = ?", (notif['token_amount'], user['id']))
+        else:
+            conn.execute(
+                "UPDATE user_spaces SET tokens = tokens + ?, "
+                "updated_at = datetime('now') WHERE id = ?",
+                (notif['token_amount'], space['id']))
+            conn.execute(
+                "UPDATE users SET remaining_tokens = remaining_tokens + ? "
+                "WHERE id = ?", (notif['token_amount'], user['id']))
+        
         conn.execute(
-            "INSERT INTO user_spaces (user_id, name, description, tokens) "
-            "VALUES (?, '试用', '专属AI试用空间', ?)",
-            (user['id'], notif['token_amount']))
-        conn.execute(
-            "UPDATE users SET remaining_tokens = remaining_tokens + ? "
-            "WHERE id = ?", (notif['token_amount'], user['id']))
-    else:
-        conn.execute(
-            "UPDATE user_spaces SET tokens = tokens + ?, "
-            "updated_at = datetime('now') WHERE id = ?",
-            (notif['token_amount'], space['id']))
-        conn.execute(
-            "UPDATE users SET remaining_tokens = remaining_tokens + ? "
-            "WHERE id = ?", (notif['token_amount'], user['id']))
-    conn.execute(
-        "UPDATE user_notifications SET is_claimed = 1, "
-        "claimed_at = datetime('now') WHERE id = ?",
-        (notification_id,))
-    conn.commit()
-    conn.close()
-    tdengine.update_claimed(user['id'], notification_id)
-    return json_response({
-        "message": f"已领取 {notif['token_amount']} Token",
-        "token_amount": notif['token_amount']
-    })
+            "UPDATE user_notifications SET is_claimed = 1, "
+            "claimed_at = datetime('now') WHERE id = ?",
+            (notification_id,))
+        
+        conn.commit()
+        
+        try:
+            tdengine.update_claimed(user['id'], notification_id)
+        except Exception:
+            pass
+        
+        return json_response({
+            "message": f"已领取 {notif['token_amount']} Token",
+            "token_amount": notif['token_amount']
+        })
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"领取 Token 失败：{e}")
+        return json_response({"error": "领取失败，请稍后重试"}, 500)
+    finally:
+        conn.close()
+
+
 
 
 def cleanup_old_notifications():
@@ -3224,64 +3259,81 @@ def claim_by_token(token):
     if not token or len(token) < 10:
         return json_response({"error": "无效的领取链接"}, 400)
     conn = get_db()
-    record = conn.execute(
-        "SELECT * FROM claim_tokens WHERE token = ?", (token,)
-    ).fetchone()
-    if not record:
-        conn.close()
-        return json_response({"error": "领取链接不存在或已失效"}, 404)
-    if record['claimed']:
-        conn.close()
-        return json_response({"error": "该 Token 已被领取"}, 400)
-    expires_at = datetime.strptime(record['expires_at'], '%Y-%m-%d %H:%M:%S')
-    if datetime.now() > expires_at:
-        conn.execute("DELETE FROM claim_tokens WHERE id = ?", (record['id'],))
-        conn.commit()
-        conn.close()
-        return json_response({"error": "领取链接已过期，请联系管理员重新发放"}, 400)
-    user_id = record['user_id']
-    token_amount = record['token_amount']
-    user = conn.execute(
-        "SELECT id, remaining_tokens FROM users WHERE id = ?", (user_id,)
-    ).fetchone()
-    if not user:
-        conn.close()
-        return json_response({"error": "用户不存在"}, 404)
-    space = conn.execute(
-        "SELECT id FROM user_spaces WHERE user_id = ? AND name = '试用'",
-        (user_id,)).fetchone()
-    if not space:
-        conn.execute(
-            "INSERT INTO user_spaces (user_id, name, description, tokens) "
-            "VALUES (?, '试用', '专属AI试用空间', ?)",
-            (user_id, token_amount))
-    else:
-        conn.execute(
-            "UPDATE user_spaces SET tokens = tokens + ?, "
-            "updated_at = datetime('now') WHERE id = ?",
-            (token_amount, space['id']))
-    conn.execute(
-        "UPDATE users SET remaining_tokens = remaining_tokens + ? "
-        "WHERE id = ?", (token_amount, user_id))
-    conn.execute(
-        "UPDATE user_notifications SET is_claimed = 1, "
-        "claimed_at = datetime('now') "
-        "WHERE user_id = ? AND notification_id = ? AND is_claimed = 0",
-        (user_id, record['notification_id']))
-    conn.execute(
-        "UPDATE claim_tokens SET claimed = 1, "
-        "claimed_at = datetime('now') WHERE id = ?", (record['id'],))
-    conn.commit()
-    conn.close()
     try:
-        tdengine.update_claimed(user_id, int(record['id']))
-    except Exception:
-        pass
-    logger.info(f"[Token领取] 用户{user_id}通过链接领取了{token_amount} Token")
-    return json_response({
-        "message": f"🎉 恭喜！您已成功领取 {token_amount} Token！",
-        "token_amount": token_amount
-    })
+        conn.execute("BEGIN IMMEDIATE")
+        
+        record = conn.execute(
+            "SELECT * FROM claim_tokens WHERE token = ?", (token,)
+        ).fetchone()
+        if not record:
+            conn.rollback()
+            return json_response({"error": "领取链接不存在或已失效"}, 404)
+        
+        if record['claimed']:
+            conn.rollback()
+            return json_response({"error": "该 Token 已被领取"}, 400)
+        
+        expires_at = datetime.strptime(record['expires_at'], '%Y-%m-%d %H:%M:%S')
+        if datetime.now() > expires_at:
+            conn.execute("DELETE FROM claim_tokens WHERE id = ?", (record['id'],))
+            conn.commit()
+            conn.rollback()
+            return json_response({"error": "领取链接已过期，请联系管理员重新发放"}, 400)
+        
+        user_id = record['user_id']
+        token_amount = record['token_amount']
+        user = conn.execute(
+            "SELECT id, remaining_tokens FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        if not user:
+            conn.rollback()
+            return json_response({"error": "用户不存在"}, 404)
+        
+        space = conn.execute(
+            "SELECT id FROM user_spaces WHERE user_id = ? AND name = '试用'",
+            (user_id,)).fetchone()
+        if not space:
+            conn.execute(
+                "INSERT INTO user_spaces (user_id, name, description, tokens) "
+                "VALUES (?, '试用', '专属 AI 试用空间', ?)",
+                (user_id, token_amount))
+        else:
+            conn.execute(
+                "UPDATE user_spaces SET tokens = tokens + ?, "
+                "updated_at = datetime('now') WHERE id = ?",
+                (token_amount, space['id']))
+        conn.execute(
+            "UPDATE users SET remaining_tokens = remaining_tokens + ? "
+            "WHERE id = ?", (token_amount, user_id))
+        conn.execute(
+            "UPDATE user_notifications SET is_claimed = 1, "
+            "claimed_at = datetime('now') "
+            "WHERE user_id = ? AND notification_id = ? AND is_claimed = 0",
+            (user_id, record['notification_id']))
+        conn.execute(
+            "UPDATE claim_tokens SET claimed = 1, "
+            "claimed_at = datetime('now') WHERE id = ?", (record['id'],))
+        
+        conn.commit()
+        
+        try:
+            tdengine.update_claimed(user_id, int(record['id']))
+        except Exception:
+            pass
+        
+        logger.info(f"[Token 领取] 用户{user_id}通过链接领取了{token_amount} Token")
+        return json_response({
+            "message": f"🎉 恭喜！您已成功领取 {token_amount} Token！",
+            "token_amount": token_amount
+        })
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"[Token 领取] 失败：{e}")
+        return json_response({"error": "领取失败，请稍后重试"}, 500)
+    finally:
+        conn.close()
+
+
 
 
 @app.route('/api/auth/claim-token/<token>/status', methods=['GET'])
