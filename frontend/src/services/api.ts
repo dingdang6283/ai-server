@@ -227,6 +227,9 @@ export const adminApi = {
   deleteIpBan: (banId: number) =>
     request<{ message: string }>(`/api/admin/ip-bans/${banId}`, { method: 'DELETE' }),
 
+  cleanExpiredIpBans: () =>
+    request<{ message: string; deleted_count: number }>('/api/admin/ip-bans/clean-expired', { method: 'DELETE' }),
+
   getIpTracking: (params?: { page?: number; per_page?: number; sort_by?: string; sort_order?: string; search?: string }) => {
     const query = new URLSearchParams()
     if (params?.page) query.set('page', String(params.page))

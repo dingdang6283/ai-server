@@ -1411,13 +1411,27 @@ function IpBansTab({ showToast, showConfirm }: { showToast: any; showConfirm: an
     <div className="card">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
         <div>
-          <h3 style={{ margin: 0 }}>IP封禁管理</h3>
+          <h3 style={{ margin: 0 }}>IP 封禁管理</h3>
           <p style={{ color: 'var(--gray-400)', fontSize: '0.8rem', marginTop: '0.25rem' }}>
-            管理被封禁的IP地址，支持自动封禁和手动封禁
+            管理被封禁的 IP 地址，支持自动封禁和手动封禁
           </p>
         </div>
-        <button className="btn btn-primary btn-sm"
-          onClick={() => setShowAddModal(true)}>添加封禁</button>
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <button className="btn btn-warning btn-sm"
+            onClick={async () => {
+              showConfirm('确定要清理过期的封禁记录吗？此操作不可恢复。', async () => {
+                try {
+                  const res = await adminApi.cleanExpiredIpBans()
+                  showToast(res.message || '清理完成', 'success')
+                  loadData()
+                } catch (err: any) {
+                  showToast(err.message || '清理失败', 'error')
+                }
+              })
+            }}>清理过期记录</button>
+          <button className="btn btn-primary btn-sm"
+            onClick={() => setShowAddModal(true)}>添加封禁</button>
+        </div>
       </div>
 
       <form onSubmit={handleSearch}

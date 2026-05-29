@@ -3603,7 +3603,8 @@ def admin_add_ip_ban():
 
     conn = get_db()
     existing = conn.execute(
-        "SELECT id FROM ip_bans WHERE ip_address = ? AND is_active = 1",
+        "SELECT id FROM ip_bans WHERE ip_address = ? AND is_active = 1 "
+        "AND (expires_at IS NULL OR expires_at > datetime('now', 'localtime'))",
         (ip_address,)).fetchone()
     if existing:
         conn.close()
@@ -3686,6 +3687,25 @@ def admin_delete_ip_ban(ban_id):
         'ip_ban', ban_id,
         f"解封IP:{ban['ip_address']}")
     return json_response({"message": "IP已解封"})
+
+
+@app.route('/api/admin/ip-bans/clean-expired', methods=['DELETE'])
+@require_admin
+def admin_clean_expired_ip_bans():
+    conn = get_db()
+    result = conn.execute(
+        "DELETE FROM ip_bans WHERE is_active = 1 AND expires_at IS NOT NULL "
+        "AND expires_at <= datetime('now', 'localtime')")
+    deleted_count = result.rowcount
+    conn.commit()
+    conn.close()
+    
+    if deleted_count > 0:
+        log_admin_action(request.current_user, 'clean_expired_ip_bans',
+            'ip_ban', None,
+            f"清理过期封禁记录 {deleted_count} 条")
+    
+    return json_response({"message": f"已清理 {deleted_count} 条过期封禁记录", "deleted_count": deleted_count})
 
 
 @app.route('/api/admin/ip-tracking', methods=['GET'])
