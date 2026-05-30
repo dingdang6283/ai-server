@@ -325,6 +325,17 @@ function UserManagementTab({ showToast, showConfirm }: { showToast: any; showCon
 
   useEffect(() => { loadData() }, [])
 
+  useEffect(() => {
+    const socket = io({ transports: ['websocket', 'polling'] })
+    socket.on('connect', () => {
+      socket.emit('join_admin_ai_requests')
+    })
+    socket.on('user_token_updated', () => {
+      loadData()
+    })
+    return () => { socket.disconnect() }
+  }, [])
+
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault()
     loadData(search)

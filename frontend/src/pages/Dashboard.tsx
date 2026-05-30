@@ -419,8 +419,8 @@ export default function Dashboard() {
         '  基础Token: ' + (usage['base_tokens'] ?? 'N/A'),
         '  联网搜索Token: ' + (usage['web_search_tokens'] ?? 0),
         '  深度思考Token: ' + (usage['deep_think_tokens'] ?? 0),
-        '  总消耗Token: ' + (usage['use-token'] ?? 'N/A'),
-        '  剩余Token: ' + (usage['token'] ?? 'N/A'),
+        '  总消耗Token: ' + (usage['used_tokens'] ?? 'N/A'),
+        '  剩余Token: ' + (usage['remaining_tokens'] ?? 'N/A'),
         res?.warning ? '⚠️ ' + res.warning : '',
       ].filter(Boolean).join('\n')
       setTestResponse(formatted)

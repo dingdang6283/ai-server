@@ -87,9 +87,9 @@ export const authApi = {
     request<LoginResponse>('/api/auth/login-with-code',
       { method: 'POST', body: JSON.stringify(data) }),
 
-  sendVerification: (email: string, purpose: string = 'register') =>
+  sendVerification: (email: string, purpose: string = 'register', captcha_id?: string, captcha_code?: string) =>
     request<{ message: string }>('/api/auth/send-verification',
-      { method: 'POST', body: JSON.stringify({ email, purpose }) }),
+      { method: 'POST', body: JSON.stringify({ email, purpose, captcha_id, captcha_code }) }),
 
   verifyEmail: (data: { email: string; code: string; purpose?: string }) =>
     request<LoginResponse>('/api/auth/verify-email',

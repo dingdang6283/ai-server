@@ -206,9 +206,17 @@ export default function LoginPage() {
       showToast('请输入邮箱', 'warning')
       return
     }
+    if (!isEmail(regEmail.trim())) {
+      showToast('请输入有效的邮箱地址', 'warning')
+      return
+    }
+    if (!captchaInput.trim()) {
+      showToast('请先完成图片验证码', 'warning')
+      return
+    }
     setRegCodeSending(true)
     try {
-      await authApi.sendVerification(regEmail, 'register')
+      await authApi.sendVerification(regEmail.trim(), 'register', captchaId, captchaInput.trim())
       showToast('验证码已发送到您的邮箱', 'success')
       setRegCountdown(60)
       const timer = setInterval(() => {
@@ -218,6 +226,10 @@ export default function LoginPage() {
         })
       }, 1000)
     } catch (err: any) {
+      if (err.message?.includes('验证码')) {
+        fetchCaptcha()
+        setCaptchaInput('')
+      }
       showToast(err.message || '发送失败', 'error')
     } finally {
       setRegCodeSending(false)
@@ -405,15 +417,16 @@ export default function LoginPage() {
             </div>
             <div className="form-group">
               <label className="label">图片验证码</label>
-              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                 {captchaImage ? (
                   <img src={captchaImage}
                     onClick={fetchCaptcha}
                     style={{ borderRadius: '0.375rem', cursor: 'pointer',
-                      height: 44, border: '1px solid rgba(255,255,255,0.1)' }}
+                      width: '100%', height: 'auto',
+                      border: '1px solid rgba(255,255,255,0.1)' }}
                     alt="验证码" title="点击刷新" />
                 ) : (
-                  <div style={{ width: 120, height: 44,
+                  <div style={{ width: '100%', height: 120,
                     background: 'rgba(0,0,0,0.2)', borderRadius: '0.375rem',
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
                     fontSize: '0.75rem', color: 'var(--gray-500)' }}>
@@ -421,9 +434,9 @@ export default function LoginPage() {
                   </div>
                 )}
                 <input className="input" type="text" placeholder="输入验证码"
-                  maxLength={4} value={captchaInput}
+                  maxLength={6} value={captchaInput}
                   onChange={e => setCaptchaInput(e.target.value)}
-                  style={{ flex: 1 }} required />
+                  style={{ width: '100%' }} required />
               </div>
             </div>
             <div className="form-group">

@@ -1,4 +1,5 @@
-import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react'
+import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from 'react'
+import { io, type Socket } from 'socket.io-client'
 import type { User } from '../types/api'
 import { authApi, userApi } from '../services/api'
 
@@ -41,6 +42,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     loading: !getInitialUser(),
     error: null
   })
+  const socketRef = useRef<Socket | null>(null)
 
   useEffect(() => {
     const user = getInitialUser()
@@ -50,6 +52,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setState(prev => ({ ...prev, loading: false }))
     }
   }, [])
+
+  useEffect(() => {
+    const currentUser = state.user
+    if (!currentUser || !currentUser.id) {
+      if (socketRef.current) {
+        socketRef.current.disconnect()
+        socketRef.current = null
+      }
+      return
+    }
+    if (socketRef.current?.connected) {
+      return
+    }
+    const socket = io({ transports: ['websocket', 'polling'] })
+    socketRef.current = socket
+    socket.on('connect', () => {
+      socket.emit('join_user_room', { user_id: currentUser.id })
+    })
+    socket.on('user_token_updated', () => {
+      refreshUser()
+    })
+    return () => {
+      socket.disconnect()
+      socketRef.current = null
+    }
+  }, [state.user?.id])
 
   const setUser = useCallback((user: User | null) => {
     if (user) {
