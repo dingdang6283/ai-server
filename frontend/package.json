@@ -21,7 +21,6 @@
     "terser": "^5.48.0",
     "typescript": "^5.5.4",
     "vite": "^5.4.2",
-    "vite-plugin-javascript-obfuscator": "^3.1.0",
-    "vite-plugin-sri4": "^2.0.0"
+    "vite-plugin-javascript-obfuscator": "^3.1.0"
   }
 }

@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DingDang Cloud - 安全测试报告</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f172a;color:#e2e8f0;padding:20px}
+.container{max-width:960px;margin:0 auto}
+h1{color:#ef4444;font-size:28px;border-bottom:2px solid #ef4444;padding-bottom:12px;margin-bottom:20px}
+h2{color:#f59e0b;font-size:18px;margin:24px 0 12px;padding:8px 12px;background:#1e293b;border-radius:6px}
+h3{color:#94a3b8;font-size:14px;margin:16px 0 8px}
+.summary{display:flex;gap:16px;margin:16px 0;flex-wrap:wrap}
+.summary-item{flex:1;min-width:120px;padding:16px;border-radius:8px;text-align:center}
+.summary-item.critical{background:#7f1d1d}
+.summary-item.high{background:#991b1b}
+.summary-item.medium{background:#92400e}
+.summary-item.low{background:#1e3a5f}
+.summary-item .count{font-size:32px;font-weight:bold}
+.summary-item .label{font-size:12px;opacity:.8;margin-top:4px}
+.vuln{background:#1e293b;border-radius:6px;padding:12px 16px;margin:8px 0;border-left:3px solid #ef4444;cursor:pointer;transition:background .2s}
+.vuln:hover{background:#334155}
+.vuln.medium{border-left-color:#f59e0b}
+.vuln.low{border-left-color:#3b82f6}
+.vuln .title{font-weight:bold;color:#f8fafc;font-size:14px}
+.vuln .meta{font-size:11px;color:#94a3b8;margin:4px 0}
+.vuln .desc{font-size:12px;color:#cbd5e1;margin:6px 0;line-height:1.5}
+.vuln .endpoint{display:inline-block;font-size:11px;background:#0f172a;color:#f59e0b;padding:2px 8px;border-radius:4px;font-family:monospace;margin-top:4px;border:1px solid #334155}
+.tag{display:inline-block;font-size:10px;padding:2px 8px;border-radius:4px;font-weight:bold;margin-right:4px}
+.tag.high{background:#ef4444;color:#fff}
+.tag.medium{background:#f59e0b;color:#000}
+.tag.low{background:#3b82f6;color:#fff}
+.footer{text-align:center;padding:24px 0;color:#64748b;font-size:11px;margin-top:30px;border-top:1px solid #1e293b}
+.click-hint{color:#64748b;font-size:11px;margin-bottom:16px;font-style:italic}
+a{color:inherit;text-decoration:none;display:block}
+</style>
+</head>
+<body>
+<div class="container">
+<h1>DingDang Cloud - 渗透测试报告</h1>
+<p style="color:#94a3b8;font-size:13px;margin-bottom:20px">
+  <span id="report-time">报告生成中...</span>
+  | 测试方式: 黑盒测试 | 目标: cloud.ai-dingdang.fucku.top
+</p>
+<p class="click-hint">💡 点击下方漏洞标题可查看详情</p>
+
+<div class="summary">
+<div class="summary-item critical"><div class="count" style="color:#ef4444">0</div><div class="label">严重</div></div>
+<div class="summary-item high"><div class="count" style="color:#ef4444" id="high-count">20</div><div class="label">高危</div></div>
+<div class="summary-item medium"><div class="count" style="color:#f59e0b" id="medium-count">30</div><div class="label">中危</div></div>
+<div class="summary-item low"><div class="count" style="color:#3b82f6" id="low-count">2</div><div class="label">低危</div></div>
+<div class="summary-item" style="background:#1e293b"><div class="count" style="color:#e2e8f0">52</div><div class="label">总计</div></div>
+</div>
+
+<h2>高危漏洞（共20项）</h2>
+
+<a href="/api/v2/query"><div class="vuln"><div class="title">H-01: SQL注入漏洞 - /api/v2/query</div><div class="meta">CVSS:9.8 | 影响:数据泄露 | 端点:POST <span class="endpoint">/api/v2/query</span></div><div class="desc">参数id存在SQL注入，可通过id=1 UNION SELECT ... 获取数据库全部数据</div></div></a>
+
+<a href="/api/v2/download"><div class="vuln"><div class="title">H-02: 任意文件读取 - /api/v2/download</div><div class="meta">CVSS:9.1 | 影响:文件泄露 | 端点:GET <span class="endpoint">/api/v2/download?file=/etc/passwd</span></div><div class="desc">file参数未过滤路径遍历字符，可读取服务器任意文件如/etc/passwd</div></div></a>
+
+<a href="/api/v2/execute"><div class="vuln"><div class="title">H-03: 远程代码执行 - /api/v2/execute</div><div class="meta">CVSS:10.0 | 影响:系统控制 | 端点:POST <span class="endpoint">/api/v2/execute</span></div><div class="desc">command参数直接传递给os.system()执行，可执行任意系统命令</div></div></a>
+
+<a href="/api/v2/admin"><div class="vuln"><div class="title">H-04: 未授权访问管理后台</div><div class="meta">CVSS:8.6 | 影响:权限提升 | 端点:GET <span class="endpoint">/api/v2/admin/</span></div><div class="desc">管理后台未做权限校验，直接访问可查看所有用户数据</div></div></a>
+
+<a href="/.env.bak"><div class="vuln"><div class="title">H-05: 敏感信息泄露 - .env文件</div><div class="meta">CVSS:7.5 | 影响:凭据泄露 | 端点:GET <span class="endpoint">/.env.bak</span></div><div class="desc">备份文件未删除，包含数据库密码和API密钥</div></div></a>
+
+<a href="/api/v2/users"><div class="vuln"><div class="title">H-06: 越权访问 - 水平越权</div><div class="meta">CVSS:8.3 | 影响:数据泄露 | 端点:GET <span class="endpoint">/api/v2/users</span></div><div class="desc">user_id参数可遍历，未校验当前用户身份</div></div></a>
+
+<a href="/api/v2/proxy"><div class="vuln"><div class="title">H-07: SSRF漏洞 - /api/v2/proxy</div><div class="meta">CVSS:8.8 | 影响:内网探测 | 端点:POST <span class="endpoint">/api/v2/proxy</span></div><div class="desc">url参数未做域名白名单校验，可访问内网MetaData服务</div></div></a>
+
+<a href="/api/v2/debug"><div class="vuln"><div class="title">H-08: 反序列化漏洞</div><div class="meta">CVSS:9.8 | 影响:代码执行 | 端点:POST <span class="endpoint">/api/v2/debug/deserialize</span></div><div class="desc">Python pickle反序列化未做安全校验，可执行任意代码</div></div></a>
+
+<a href="/api/v2/config"><div class="vuln"><div class="title">H-09: XML外部实体注入 - XXE</div><div class="meta">CVSS:9.1 | 影响:文件读取 | 端点:POST <span class="endpoint">/api/v2/parse-xml</span></div><div class="desc">XML解析器未禁用外部实体，可读取服务器任意文件</div></div></a>
+
+<a href="/api/v2/login"><div class="vuln"><div class="title">H-10: JWT密钥硬编码</div><div class="meta">CVSS:7.5 | 影响:身份伪造 | 端点:全局 <span class="endpoint">JWT Token</span></div><div class="desc">JWT签名密钥硬编码在源码中，可伪造任意用户Token</div></div></a>
+
+<a href="/api/v2/check-email"><div class="vuln"><div class="title">H-11: 批量账号枚举</div><div class="meta">CVSS:7.0 | 影响:信息泄露 | 端点:POST <span class="endpoint">/api/v2/check-email</span></div><div class="desc">注册接口存在用户枚举，返回不同错误码区分已注册/未注册</div></div></a>
+
+<a href="/api/v2/reset-password"><div class="vuln"><div class="title">H-12: 密码重置Token弱随机</div><div class="meta">CVSS:7.8 | 影响:账号接管 | 端点:POST <span class="endpoint">/api/v2/reset-password</span></div><div class="desc">重置密码Token使用时间戳+顺序数字生成，可预测</div></div></a>
+
+<a href="/api/v2/upload"><div class="vuln"><div class="title">H-13: 文件上传 - 任意文件写入</div><div class="meta">CVSS:9.0 | 影响:远程代码 | 端点:POST <span class="endpoint">/api/v2/upload</span></div><div class="desc">上传文件未校验类型，可上传webshell到web目录</div></div></a>
+
+<a href="/api/v2/register"><div class="vuln"><div class="title">H-14: NoSQL注入</div><div class="meta">CVSS:8.5 | 影响:认证绕过 | 端点:POST <span class="endpoint">/api/v2/register</span></div><div class="desc">JSON参数支持$ne/$regex等操作符，可绕过登录认证</div></div></a>
+
+<a href="/api/v2/logs"><div class="vuln"><div class="title">H-15: 日志信息泄露</div><div class="meta">CVSS:7.2 | 影响:敏感信息 | 端点:GET <span class="endpoint">/api/v2/logs</span></div><div class="desc">日志接口未做权限校验，包含用户Token和请求数据</div></div></a>
+
+<a href="/admin"><div class="vuln"><div class="title">H-16: 跨站请求伪造 - CSRF</div><div class="meta">CVSS:8.0 | 影响:非法操作 | 端点:全局 <span class="endpoint">/admin/config</span></div><div class="desc">所有API未添加CSRF Token防护，可被第三方网站伪造请求</div></div></a>
+
+<a href="/debug/console"><div class="vuln"><div class="title">H-17: 内存信息泄露</div><div class="meta">CVSS:7.0 | 影响:敏感数据 | 端点:GET <span class="endpoint">/debug/console/memory</span></div><div class="desc">调试接口未关闭，可读取内存中的敏感字符串</div></div></a>
+
+<a href="/api/v2/ping"><div class="vuln"><div class="title">H-18: 命令注入 - Ping接口</div><div class="meta">CVSS:9.3 | 影响:远程命令 | 端点:POST <span class="endpoint">/api/v2/ping</span></div><div class="desc">host参数直接拼接命令，可通过|;&等符号执行任意命令</div></div></a>
+
+<a href="/src"><div class="vuln"><div class="title">H-19: 目录列表开启</div><div class="meta">CVSS:7.0 | 影响:文件枚举 | 端点:GET <span class="endpoint">/src/</span></div><div class="desc">静态资源目录开启了目录浏览，可列出所有前端文件</div></div></a>
+
+<a href="/api/v2/debug"><div class="vuln"><div class="title">H-20: 传参注入 - Header注入</div><div class="meta">CVSS:8.0 | 影响:请求伪造 | 端点:POST <span class="endpoint">/api/v2/proxy-headers</span></div><div class="desc">User-Agent参数直接拼入请求头，可进行CRLF注入</div></div></a>
+
+<h2>中危漏洞（共30项）</h2>
+
+<a href="/api/v2/search"><div class="vuln medium"><div class="title">M-01: XSS反射型 - /api/v2/search</div><div class="meta">CVSS:6.1 | 影响:XSS攻击 | 端点:GET <span class="endpoint">/api/v2/search?q=</span></div><div class="desc">搜索参数未转义直接返回前端执行</div></div></a>
+
+<a href="/api/v2/profile"><div class="vuln medium"><div class="title">M-02: XSS存储型 - 用户昵称</div><div class="meta">CVSS:6.5 | 影响:持久XSS | 端点:PUT <span class="endpoint">/api/v2/profile</span></div><div class="desc">昵称字段未过滤HTML标签，存储后影响其他用户</div></div></a>
+
+<a href="/api/v2/captcha"><div class="vuln medium"><div class="title">M-03: CORS配置宽松</div><div class="meta">CVSS:5.5 | 影响:跨域攻击 | 端点:全局</div><div class="desc">Access-Control-Allow-Origin设置为通配符</div></div></a>
+
+<a href="/api/v2/verify-code"><div class="vuln medium"><div class="title">M-04: 验证码复用</div><div class="meta">CVSS:5.0 | 影响:暴力破解 | 端点:POST <span class="endpoint">/api/v2/captcha</span></div><div class="desc">验证码验证后未立即失效，可重复使用</div></div></a>
+
+<a href="/api/v2/login"><div class="vuln medium"><div class="title">M-05: 明文传输密码</div><div class="meta">CVSS:5.9 | 影响:中间人攻击 | 端点:POST <span class="endpoint">/api/v2/login</span></div><div class="desc">登录密码未使用加密传输，仅依赖HTTPS</div></div></a>
+
+<a href="/api/v2/session"><div class="vuln medium"><div class="title">M-06: Session固定攻击</div><div class="meta">CVSS:5.3 | 影响:会话劫持 | 端点:POST <span class="endpoint">/api/v2/login</span></div><div class="desc">登录前后Session ID不刷新，可被固定</div></div></a>
+
+<a href="/api/v2/orders"><div class="vuln medium"><div class="title">M-07: 越权访问订单信息</div><div class="meta">CVSS:5.7 | 影响:信息泄露 | 端点:GET <span class="endpoint">/api/v2/orders/</span></div><div class="desc">订单ID可遍历，未校验归属权</div></div></a>
+
+<a href="/api/v2/users"><div class="vuln medium"><div class="title">M-08: 用户手机号泄露</div><div class="meta">CVSS:5.0 | 影响:隐私泄露 | 端点:GET <span class="endpoint">/api/v2/users/</span></div><div class="desc">用户列表接口返回了手机号字段</div></div></a>
+
+<a href="/api/v2/verify-code"><div class="vuln medium"><div class="title">M-09: 验证码有效期过长</div><div class="meta">CVSS:4.8 | 影响:暴力破解 | 端点:POST <span class="endpoint">/api/v2/verify-code</span></div><div class="desc">邮箱验证码有效期30分钟，时间窗口过大</div></div></a>
+
+<a href="/api/v2/rate-limit"><div class="vuln medium"><div class="title">M-10: 请求频率限制过低</div><div class="meta">CVSS:4.5 | 影响:DoS攻击 | 端点:全局</div><div class="desc">API每分钟允许1000次请求，无有效限流</div></div></a>
+
+<a href="/api/v2/captcha-image"><div class="vuln medium"><div class="title">M-11: 图片验证码识别难度低</div><div class="meta">CVSS:4.2 | 影响:机器识别 | 端点:GET <span class="endpoint">/api/v2/captcha</span></div><div class="desc">验证码未添加干扰线和噪点，OCR可识别</div></div></a>
+
+<a href="/api/v2/include"><div class="vuln medium"><div class="title">M-12: 文件包含漏洞</div><div class="meta">CVSS:6.0 | 影响:文件读取 | 端点:GET <span class="endpoint">/api/v2/include</span></div><div class="desc">page参数存在本地文件包含漏洞</div></div></a>
+
+<a href="/api/v2/hsts"><div class="vuln medium"><div class="title">M-13: HTTPS配置不完善</div><div class="meta">CVSS:4.0 | 影响:中间人攻击 | 端点:全局</div><div class="desc">未启用HSTS Preload，支持TLS1.0/1.1</div></div></a>
+
+<a href="/api/v2/cookie"><div class="vuln medium"><div class="title">M-14: Cookie未设置Secure标志</div><div class="meta">CVSS:4.5 | 影响:Cookie窃取 | 端点:全局</div><div class="desc">Cookie缺少Secure和HttpOnly属性</div></div></a>
+
+<a href="/api/v2/test-login"><div class="vuln medium"><div class="title">M-15: 存在测试账号</div><div class="meta">CVSS:5.2 | 影响:越权访问 | 端点:POST <span class="endpoint">/api/v2/login</span></div><div class="desc">测试账号test/test123在生产环境未删除</div></div></a>
+
+<a href="/api/v2/password-policy"><div class="vuln medium"><div class="title">M-16: 密码复杂度要求低</div><div class="meta">CVSS:3.9 | 影响:暴力破解 | 端点:全局</div><div class="desc">仅要求6位以上字母数字混合</div></div></a>
+
+<a href="/api/v2/audit-log"><div class="vuln medium"><div class="title">M-17: 缺少日志审计</div><div class="meta">CVSS:4.0 | 影响:溯源困难 | 端点:全局</div><div class="desc">敏感操作未记录操作日志</div></div></a>
+
+<a href="/api/v2/icp"><div class="vuln medium"><div class="title">M-18: 备案信息不存在</div><div class="meta">CVSS:3.5 | 影响:合规风险 | 端点:全局</div><div class="desc">网站未显示备案号，违反相关法规</div></div></a>
+
+<a href="/api/v2/content-filter"><div class="vuln medium"><div class="title">M-19: 敏感词过滤缺失</div><div class="meta">CVSS:4.5 | 影响:合规风险 | 端点:POST <span class="endpoint">/api/v2/content</span></div><div class="desc">用户发布内容未做敏感词过滤</div></div></a>
+
+<a href="/api/v2/source-map"><div class="vuln medium"><div class="title">M-20: 前端源码暴露API结构</div><div class="meta">CVSS:4.2 | 影响:信息泄露 | 端点:全局</div><div class="desc">前端JS中包含完整API端点路径</div></div></a>
+
+<a href="/api/v2/error-stack"><div class="vuln medium"><div class="title">M-21: 错误信息泄露堆栈</div><div class="meta">CVSS:4.8 | 影响:信息泄露 | 端点:全局</div><div class="desc">500错误返回Python调用堆栈信息</div></div></a>
+
+<a href="/api/v2/metadata"><div class="vuln medium"><div class="title">M-22: Metadata服务可访问</div><div class="meta">CVSS:6.2 | 影响:云凭据泄露 | 端点:SSRF</div><div class="desc">服务器可访问169.254.169.254云厂商Metadata</div></div></a>
+
+<a href="/api/v2/admin"><div class="vuln medium"><div class="title">M-23: 后台接口无操作鉴权</div><div class="meta">CVSS:5.5 | 影响:权限提升 | 端点:PUT <span class="endpoint">/api/v2/admin/config</span></div><div class="desc">后台配置接口仅校验登录未校验角色</div></div></a>
+
+<a href="/api/v2/universal-password"><div class="vuln medium"><div class="title">M-24: 存在万能密码</div><div class="meta">CVSS:6.0 | 影响:认证绕过 | 端点:POST <span class="endpoint">/api/v2/login</span></div><div class="desc">调试用万能密码'or'1'='1在生产环境仍存在</div></div></a>
+
+<a href="/api/v2/swagger.json"><div class="vuln medium"><div class="title">M-25: API文档未关闭</div><div class="meta">CVSS:4.0 | 影响:信息泄露 | 端点:GET <span class="endpoint">/api/v2/docs</span></div><div class="desc">Swagger API文档在生产环境可访问</div></div></a>
+
+<a href="/api/v2/login"><div class="vuln medium"><div class="title">M-26: 登录接口无验证码</div><div class="meta">CVSS:5.0 | 影响:暴力破解 | 端点:POST <span class="endpoint">/api/v2/login</span></div><div class="desc">登录接口未添加图形验证码</div></div></a>
+
+<a href="/api/v2/jwt"><div class="vuln medium"><div class="title">M-27: JWT Token永不过期</div><div class="meta">CVSS:4.5 | 影响:Token泄露 | 端点:全局</div><div class="desc">JWT Token未设置过期时间</div></div></a>
+
+<a href="/api/v2/account-lock"><div class="vuln medium"><div class="title">M-28: 账户锁定机制缺失</div><div class="meta">CVSS:5.5 | 影响:暴力破解 | 端点:POST <span class="endpoint">/api/v2/login</span></div><div class="desc">连续错误登录不锁定账户</div></div></a>
+
+<a href="/api/v2/api-version"><div class="vuln medium"><div class="title">M-29: API版本控制缺失</div><div class="meta">CVSS:3.5 | 影响:接口兼容 | 端点:全局</div><div class="desc">API无版本号控制，变更影响旧客户端</div></div></a>
+
+<a href="/api/v2/third-party"><div class="vuln medium"><div class="title">M-30: 第三方组件漏洞</div><div class="meta">CVSS:5.0 | 影响:组件安全 | 端点:全局</div><div class="desc">使用的Flask 2.0.1版本存在已知CVE</div></div></a>
+
+<h2>低危漏洞（共2项）</h2>
+
+<a href="/server-status"><div class="vuln low"><div class="title">L-01: 服务器版本信息泄露</div><div class="meta">CVSS:3.1 | 影响:信息收集 | 端点:全局</div><div class="desc">HTTP响应头包含OpenResty版本号</div></div></a>
+
+<a href="/config"><div class="vuln low"><div class="title">L-02: 无安全联系邮箱</div><div class="meta">CVSS:1.5 | 影响:安全报告 | 端点:全局</div><div class="desc">未配置security.txt安全联系信息</div></div></a>
+
+<div class="footer">
+<p>DingDang Cloud Security Assessment Report</p>
+<p>Generated by Automated Security Scanner v4.2 | 2026 DingDang Cloud</p>
+<p style="margin-top:8px;color:#334155;font-size:10px">本报告仅供内部安全审计使用，请勿外传</p>
+</div>
+</div>
+<script>
+document.getElementById('report-time').textContent = new Date().toLocaleString('zh-CN');
+</script>
+</body>
+</html>

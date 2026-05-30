@@ -1,6 +1,6 @@
 import type {
   User, LoginResponse, RegisterResponse, TokenConfig, TokenStats,
-  AdminUser, AdminTask, BatchRequest, UsageStats, CalculateTokenResult, UsageHistory,
+  AdminUser, AdminTask, UsageStats, CalculateTokenResult, UsageHistory,
   Space, ContextMessage, ContextSettings, Notification,
   IPBan, IPTracking, AuditLogEntry
 } from '../types/api'
@@ -184,22 +184,6 @@ export const adminApi = {
   cleanupTasks: () =>
     request<{ message: string }>('/api/admin/tasks/cleanup', { method: 'POST' }),
 
-  getBatchRequests: (params?: { limit?: number; status?: string; user?: string }) => {
-    const query = new URLSearchParams()
-    if (params?.limit) query.set('limit', String(params.limit))
-    if (params?.status) query.set('status', params.status)
-    if (params?.user) query.set('user', params.user)
-    const qs = query.toString()
-    return request<{ requests: BatchRequest[] }>(
-      `/api/admin/batch-requests${qs ? `?${qs}` : ''}`)
-  },
-
-  getBatchRequest: (requestId: number) =>
-    request<{ request: BatchRequest }>(`/api/admin/batch-requests/${requestId}`),
-
-  cleanupBatchRequests: (days: number = 7) =>
-    request<{ message: string }>(`/api/admin/batch-requests/cleanup?days=${days}`, { method: 'POST' }),
-
   sendNotification: (data: {
     subject: string; body: string; type: string;
     token_amount?: number; target_type: string;
@@ -323,44 +307,7 @@ export const aiApi = {
           ...(deepThink !== undefined ? { deep_think: deepThink } : {})
         }) }),
 
-  submitBatchJob: (messages: Array<{ role: string; content: string }>,
-    model: string = 'qwen', maxTokens: number = 500,
-    temperature: number = 0.7) =>
-    request<{ job_id: string; status: string; message: string }>(
-      '/v1/batch/jobs',
-      { method: 'POST', body: JSON.stringify({
-        messages, model, max_tokens: maxTokens, temperature
-      })}),
-
-  listBatchJobs: () =>
-    request<{ object: string; data: any[] }>('/v1/batch/jobs'),
-
-  getBatchJob: (jobId: string) =>
-    request<any>(`/v1/batch/jobs/${jobId}`),
-
-  listBatches: (limit: number = 10) =>
-    request<{ object: string; data: any[] }>(
-      `/v1/batch/batches?limit=${limit}`),
-
-  getBatchStatus: (batchId: string) =>
-    request<any>(`/v1/batch/batches/${batchId}`),
-
-  getBatchResults: (batchId: string) =>
-    request<{ batch_id: string; status: string; requests: any[]; responses: any[] }>(
-      `/v1/batch/batches/${batchId}/results`),
-
-  cancelBatch: (batchId: string) =>
-    request<any>(`/v1/batch/batches/${batchId}/cancel`,
-      { method: 'POST' }),
-
-  listFiles: (page: number = 1, size: number = 20) =>
-    request<{ object: string; data: any[] }>(
-      `/v1/batch/files?page=${page}&size=${size}`),
-
-  deleteFile: (fileId: string) =>
-    request<{ id: string; deleted: boolean }>(
-      `/v1/batch/files/${fileId}`, { method: 'DELETE' }),
-}
+  }
 
 export const notificationApi = {
   list: () =>

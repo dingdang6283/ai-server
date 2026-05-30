@@ -2,9 +2,9 @@ import { useState, useEffect, useRef } from 'react'
 import { io, Socket } from 'socket.io-client'
 import { adminApi, aiApi } from '../services/api'
 import { useToast } from '../components/Toast'
-import type { AdminUser, TokenConfig, UsageStats, IPBan, IPTracking, AuditLogEntry, AdminTask, BatchRequest } from '../types/api'
+import type { AdminUser, TokenConfig, UsageStats, IPBan, IPTracking, AuditLogEntry, AdminTask } from '../types/api'
 
-type AdminTab = 'users' | 'ip_monitor' | 'ip_bans' | 'audit_log' | 'batch' | 'tasks'
+type AdminTab = 'users' | 'ip_monitor' | 'ip_bans' | 'audit_log' | 'tasks'
 
 const priorityLabels: Record<number, string> = {
   0: '最高', 1: '高', 2: '中', 3: '较低', 4: '低', 5: '最低'
@@ -15,7 +15,6 @@ const TAB_NAMES: Record<AdminTab, string> = {
   ip_monitor: 'IP监控',
   ip_bans: 'IP封禁',
   audit_log: '审计日志',
-  batch: '批处理管理',
   tasks: '任务管理'
 }
 
@@ -58,7 +57,6 @@ export default function AdminPanel() {
       {activeTab === 'ip_monitor' && <IpMonitorTab showToast={showToast} />}
       {activeTab === 'ip_bans' && <IpBansTab showToast={showToast} showConfirm={showConfirm} />}
       {activeTab === 'audit_log' && <AuditLogTab showToast={showToast} />}
-      {activeTab === 'batch' && <BatchManagementTab showToast={showToast} showLoading={showLoading} closeToast={closeToast} />}
       {activeTab === 'tasks' && <TasksManagementTab showToast={showToast} />}
     </div>
   )
@@ -976,353 +974,6 @@ function IpMonitorTab({ showToast }: { showToast: any }) {
       )
     }
 
-function BatchManagementTab({ showToast, showLoading, closeToast }: { showToast: any; showLoading: any; closeToast: any }) {
-  const [requests, setRequests] = useState<BatchRequest[]>([])
-  const [files, setFiles] = useState<any[]>([])
-  const [activeSubTab, setActiveSubTab] = useState<'requests' | 'files' | 'settings'>('requests')
-  const [selectedRequest, setSelectedRequest] = useState<BatchRequest | null>(null)
-  const [connected, setConnected] = useState(false)
-  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'polling'>('connecting')
-  const socketRef = useRef<Socket | null>(null)
-  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const mountedRef = useRef(true)
-  const [autoDeleteDays, setAutoDeleteDays] = useState(30)
-  const [settingsLoading, setSettingsLoading] = useState(false)
-
-  useEffect(() => {
-    return () => { mountedRef.current = false }
-  }, [])
-
-  const loadRequests = async () => {
-    try {
-      const res = await adminApi.getBatchRequests({ limit: 100 })
-      if (mountedRef.current) setRequests(res?.requests || [])
-    } catch (err: any) {
-      console.error('加载批处理记录失败:', err)
-    }
-  }
-
-  const loadFiles = async () => {
-    try {
-      const res = await aiApi.listFiles()
-      if (mountedRef.current) setFiles(res?.data || [])
-    } catch (err: any) {
-      showToast(err.message || '加载文件失败', 'error')
-    }
-  }
-
-  useEffect(() => {
-    loadRequests()
-    loadFiles()
-
-    const wsUrl = window.location.origin.replace(/^http/, 'ws')
-    const socket = io(wsUrl, {
-      transports: ['polling', 'websocket'],
-      reconnection: true,
-      reconnectionAttempts: 10,
-      reconnectionDelay: 3000,
-      reconnectionDelayMax: 10000,
-      timeout: 30000,
-    })
-
-    const startPolling = () => {
-      if (pollTimerRef.current) {
-        clearInterval(pollTimerRef.current)
-      }
-      pollTimerRef.current = setInterval(loadRequests, 1000)
-      console.log('[Batch] 开始轮询模式')
-      setConnectionStatus('polling')
-      loadRequests()
-    }
-
-    const stopPolling = () => {
-      if (pollTimerRef.current) {
-        clearInterval(pollTimerRef.current)
-        pollTimerRef.current = null
-        console.log('[Batch] 停止轮询模式')
-      }
-    }
-
-    socket.on('connect', () => {
-      console.log('[WebSocket] 已连接')
-      setConnected(true)
-      setConnectionStatus('connected')
-      stopPolling()
-      socket.emit('join_admin_batch')
-    })
-
-    socket.on('disconnect', () => {
-      console.log('[WebSocket] 已断开')
-      setConnected(false)
-      setConnectionStatus('disconnected')
-      startPolling()
-    })
-
-    socket.on('connect_error', (err: any) => {
-      console.log('[WebSocket] 连接失败:', err.message)
-      setConnected(false)
-      setConnectionStatus('disconnected')
-      startPolling()
-    })
-
-    socket.on('reconnect_attempt', (attempt: number) => {
-      console.log('[WebSocket] 重连尝试:', attempt)
-      setConnectionStatus('connecting')
-    })
-
-    socket.on('reconnect_error', (err: any) => {
-      console.log('[WebSocket] 重连失败:', err.message)
-      setConnectionStatus('disconnected')
-    })
-
-    socket.on('reconnect_failed', () => {
-      console.log('[WebSocket] 重连失败，切换到轮询')
-      setConnectionStatus('polling')
-      startPolling()
-    })
-
-    socket.on('batch_update', (data: { type: string; requests?: BatchRequest[]; request?: BatchRequest }) => {
-      console.log('[WebSocket] 收到批处理更新:', data)
-      if (data.requests) {
-        setRequests(data.requests)
-      } else if (data.request) {
-        setRequests(prev => {
-          const idx = prev.findIndex(r => r.job_id === data.request!.job_id)
-          if (idx >= 0) {
-            const newRequests = [...prev]
-            newRequests[idx] = data.request!
-            return newRequests
-          }
-          return [data.request!, ...prev]
-        })
-      }
-    })
-
-    socketRef.current = socket
-
-    setTimeout(() => {
-      if (!socket.connected) {
-        console.log('[WebSocket] 连接超时，启用轮询')
-        startPolling()
-      }
-    }, 5000)
-
-    return () => {
-      socket.disconnect()
-      stopPolling()
-    }
-  }, [])
-
-  useEffect(() => {
-    loadFiles()
-  }, [])
-
-  const handleDeleteFile = async (fileId: string) => {
-    try {
-      const res = await aiApi.deleteFile(fileId)
-      showToast(res?.deleted ? '已删除' : '删除失败', res?.deleted ? 'success' : 'error')
-      loadFiles()
-    } catch (err: any) {
-      showToast(err.message || '删除失败', 'error')
-    }
-  }
-
-  const formatDateTime = (dateStr: string | null | undefined) => {
-    if (!dateStr) return '-'
-    try {
-      const d = new Date(dateStr)
-      return d.toLocaleString('zh-CN')
-    } catch {
-      return dateStr
-    }
-  }
-
-  const statusTag = (status: string) => {
-    const colorMap: Record<string, string> = {
-      completed: 'var(--success)',
-      failed: 'var(--error)',
-      processing: 'var(--primary-500)',
-      queued: 'var(--warning)'
-    }
-    const labelMap: Record<string, string> = {
-      completed: '已完成',
-      failed: '失败',
-      processing: '处理中',
-      queued: '排队中'
-    }
-    return (
-      <span style={{
-        color: colorMap[status] || 'var(--gray-400)',
-        fontWeight: 600, fontSize: '0.75rem'
-      }}>
-        {labelMap[status] || status}
-      </span>
-    )
-  }
-
-  const purposeTag = (purpose: string) => {
-    const labelMap: Record<string, string> = {
-      batch: '输入文件',
-      'batch_processor:success': '结果文件(成功)',
-      'batch_processor:failed': '结果文件(失败)',
-    }
-    const colorMap: Record<string, string> = {
-      batch: 'var(--info)',
-      'batch_processor:success': 'var(--success)',
-      'batch_processor:failed': 'var(--error)',
-    }
-    const label = labelMap[purpose] || purpose
-    const color = colorMap[purpose] || 'var(--gray-400)'
-    return (
-      <span style={{ color, fontSize: '0.75rem' }}>
-        {label}
-      </span>
-    )
-  }
-
-  const formatTime = (ts: number | null | undefined) => {
-    if (!ts) return '-'
-    return new Date(ts * 1000).toLocaleString('zh-CN')
-  }
-
-  return (
-    <div>
-      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem', alignItems: 'center' }}>
-        <button className={`btn btn-sm ${activeSubTab === 'requests' ? 'btn-primary' : 'btn-secondary'}`}
-          onClick={() => setActiveSubTab('requests')}>
-          用户批处理记录
-        </button>
-        <button className={`btn btn-sm ${activeSubTab === 'files' ? 'btn-primary' : 'btn-secondary'}`}
-          onClick={() => setActiveSubTab('files')}>
-          Xfyun 文件列表
-        </button>
-        <span style={{
-          fontSize: '0.7rem', padding: '0.3rem 0.5rem', borderRadius: 4,
-          color: connectionStatus === 'connected' ? '#22c55e' : connectionStatus === 'connecting' ? '#eab308' : '#ef4444',
-          border: `1px solid ${connectionStatus === 'connected' ? '#22c55e' : connectionStatus === 'connecting' ? '#eab308' : '#ef4444'}`,
-          marginLeft: 'auto',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '0.3rem'
-        }}>
-          <span>{connectionStatus === 'connected' ? '🟢' : connectionStatus === 'connecting' ? '🟡' : '🔴'}</span>
-          <span>{connectionStatus === 'connected' ? '实时推送' : connectionStatus === 'connecting' ? '连接中...' : connectionStatus === 'polling' ? '轮询模式' : '未连接'}</span>
-        </span>
-      </div>
-
-      {activeSubTab === 'requests' ? (
-        <>
-          {selectedRequest && (
-            <div className="card" style={{ marginBottom: '1rem', padding: '0.75rem' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-                <h4 style={{ margin: 0 }}>请求详情: {selectedRequest.job_id}</h4>
-                <button className="btn btn-secondary btn-sm" onClick={() => setSelectedRequest(null)}>关闭</button>
-              </div>
-              <div style={{ fontSize: '0.75rem' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '0.5rem', marginBottom: '1rem' }}>
-                  <div>
-                    <p><strong>用户:</strong> {selectedRequest.username} (ID: {selectedRequest.user_id})</p>
-                    <p><strong>模型:</strong> {selectedRequest.model}</p>
-                    <p><strong>状态:</strong> {statusTag(selectedRequest.status)}</p>
-                  </div>
-                  <div>
-                    <p><strong>创建时间:</strong> {formatDateTime(selectedRequest.created_at)}</p>
-                    <p><strong>更新时间:</strong> {formatDateTime(selectedRequest.updated_at)}</p>
-                    {selectedRequest.xfyun_batch_id && (
-                      <p><strong>讯飞批次:</strong> {selectedRequest.xfyun_batch_id}</p>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-        </>
-      ) : activeSubTab === 'settings' ? (
-        <div style={{ maxWidth: 800 }}>
-          <div className="card" style={{ marginBottom: '1rem' }}>
-            <h3 style={{ margin: '0 0 1rem 0', fontSize: '1rem' }}>🗂️ 文件管理规则</h3>
-            
-            <div style={{ marginBottom: '1.5rem' }}>
-              <label style={{ display: 'block', fontWeight: 600, marginBottom: '0.5rem' }}>
-                自动删除规则
-              </label>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                <input
-                  type="number"
-                  min="1"
-                  max="365"
-                  value={autoDeleteDays}
-                  onChange={(e) => setAutoDeleteDays(parseInt(e.target.value) || 30)}
-                  style={{
-                    width: 80,
-                    padding: '0.5rem',
-                    borderRadius: '4px',
-                    border: '1px solid var(--gray-300)',
-                    fontSize: '0.875rem'
-                  }}
-                />
-                <span>天后自动删除批处理记录</span>
-                <button
-                  className="btn btn-primary"
-                  onClick={async () => {
-                    setSettingsLoading(true)
-                    try {
-                      await fetch('/api/admin/batch-settings', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ auto_delete_days: autoDeleteDays })
-                      })
-                      showToast('设置已保存', 'success')
-                    } catch (err: any) {
-                      showToast(err.message || '保存失败', 'error')
-                    } finally {
-                      setSettingsLoading(false)
-                    }
-                  }}
-                  disabled={settingsLoading}
-                >
-                  {settingsLoading ? '保存中...' : '保存设置'}
-                </button>
-              </div>
-              <p style={{ fontSize: '0.75rem', color: 'var(--gray-500)', marginTop: '0.5rem' }}>
-                ℹ️ 系统会自动清理超过设定天数的批处理记录，保持数据库整洁
-              </p>
-            </div>
-            
-            <div style={{ borderTop: '1px solid var(--gray-200)', paddingTop: '1rem' }}>
-              <h4 style={{ margin: '0 0 0.5rem 0', fontSize: '0.875rem' }}>📊 当前统计</h4>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.5rem' }}>
-                <div style={{ padding: '0.75rem', background: 'rgba(59,130,246,0.1)', borderRadius: '4px' }}>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--gray-500)' }}>总记录数</div>
-                  <div style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--info)' }}>{requests.length}</div>
-                </div>
-                <div style={{ padding: '0.75rem', background: 'rgba(34,197,94,0.1)', borderRadius: '4px' }}>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--gray-500)' }}>文件数量</div>
-                  <div style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--success)' }}>{files.length}</div>
-                </div>
-                <div style={{ padding: '0.75rem', background: 'rgba(245,158,11,0.1)', borderRadius: '4px' }}>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--gray-500)' }}>清理周期</div>
-                  <div style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--warning)' }}>{autoDeleteDays}天</div>
-                </div>
-              </div>
-            </div>
-          </div>
-          
-          <div className="card">
-            <h4 style={{ margin: '0 0 0.5rem 0', fontSize: '0.875rem' }}>💡 使用说明</h4>
-            <ul style={{ fontSize: '0.75rem', color: 'var(--gray-600)', margin: 0, paddingLeft: '1.25rem' }}>
-              <li>批处理记录会永久保存，除非手动删除或超过自动清理期限</li>
-              <li>文件列表中的文件可以被删除，但请确保没有正在进行的批处理任务使用该文件</li>
-              <li>自动清理任务会在每天凌晨自动执行</li>
-              <li>可以在"批处理记录"标签页查看用户的详细提问和 AI 回复</li>
-            </ul>
-          </div>
-        </div>
-      ) : null}
-    </div>
-  )
-}
-
 function IpBansTab({ showToast, showConfirm }: { showToast: any; showConfirm: any }) {
   const [bans, setBans] = useState<IPBan[]>([])
   const [loading, setLoading] = useState(true)
@@ -1380,13 +1031,17 @@ function IpBansTab({ showToast, showConfirm }: { showToast: any; showConfirm: an
   }
 
   const handleUnban = (ban: IPBan) => {
-    showConfirm(`确定要解封 IP ${ban.ip_address} 吗？`, async () => {
+    const isActiveBan = isActive(ban)
+    const confirmMsg = isActiveBan 
+      ? `确定要解封 IP ${ban.ip_address} 吗？` 
+      : `确定要删除 IP ${ban.ip_address} 的记录吗？`
+    showConfirm(confirmMsg, async () => {
       try {
         await adminApi.deleteIpBan(ban.id)
-        setBans(prev => prev.map(b => b.id === ban.id ? { ...b, is_active: 0 } : b))
-        showToast('IP已解封', 'success')
+        setBans(prev => prev.filter(b => b.id !== ban.id))
+        showToast(isActiveBan ? 'IP 已解封' : 'IP 记录已删除', 'success')
       } catch (err: any) {
-        showToast(err.message || '解封失败', 'error')
+        showToast(err.message || (isActiveBan ? '解封失败' : '删除失败'), 'error')
       }
     })
   }
@@ -1448,8 +1103,17 @@ function IpBansTab({ showToast, showConfirm }: { showToast: any; showConfirm: an
         )}
       </form>
 
-      <div style={{ overflowX: 'auto' }}>
-        <table>
+      <div className="table-wrap">
+        <table style={{ minWidth: 750 }}>
+          <colgroup>
+            <col style={{ width: '20%' }} />
+            <col style={{ width: '30%' }} />
+            <col style={{ width: '10%' }} />
+            <col style={{ width: '10%' }} />
+            <col style={{ width: '12%' }} />
+            <col style={{ width: '10%' }} />
+            <col style={{ width: '8%' }} />
+          </colgroup>
           <thead>
             <tr>
               <th>IP地址</th>
@@ -1464,8 +1128,8 @@ function IpBansTab({ showToast, showConfirm }: { showToast: any; showConfirm: an
           <tbody>
             {bans.map(ban => (
               <tr key={ban.id}>
-                <td style={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>{ban.ip_address}</td>
-                <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>{ban.reason}</td>
+                <td style={{ fontFamily: 'monospace', fontSize: '0.8rem', wordBreak: 'break-all' }}>{ban.ip_address}</td>
+                <td style={{ maxWidth: 250, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={ban.reason}>{ban.reason}</td>
                 <td>
                   <span className={'tag ' + (ban.ban_type === 'auto' ? 'tag-warning' : 'tag-admin')}>
                     {getBanTypeLabel(ban.ban_type)}
@@ -1478,13 +1142,16 @@ function IpBansTab({ showToast, showConfirm }: { showToast: any; showConfirm: an
                 </td>
                 <td style={{ fontSize: '0.8rem', whiteSpace: 'nowrap' }}>{ban.created_at}</td>
                 <td style={{ fontSize: '0.8rem', whiteSpace: 'nowrap' }}>{ban.expires_at || '永久'}</td>
-                <td>
-                  {isActive(ban) && (
-                    <div style={{ display: 'flex', gap: '0.25rem' }}>
+                <td style={{ whiteSpace: 'nowrap' }}>
+                  <div style={{ display: 'flex', gap: '0.25rem' }}>
+                    {isActive(ban) ? (
                       <button className="btn btn-sm btn-success"
                         onClick={() => handleUnban(ban)}>解封</button>
-                    </div>
-                  )}
+                    ) : (
+                      <button className="btn btn-sm btn-danger"
+                        onClick={() => handleUnban(ban)}>删除</button>
+                    )}
+                  </div>
                 </td>
               </tr>
             ))}
