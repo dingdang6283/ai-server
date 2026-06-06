@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import { useAuth } from '../hooks/useAuth'
 import { aiApi, userApi, authApi, spaceApi, notificationApi } from '../services/api'
 import { useToast } from '../components/Toast'
+import BadgeDisplay from '../components/BadgeDisplay'
 import type { CalculateTokenResult, DailyUsage, Space, ContextMessage, Notification } from '../types/api'
 
 type TabType = 'curl' | 'python'
@@ -897,7 +898,7 @@ export default function Dashboard() {
               </div>
               <div>
                 <span style={{ color: 'var(--gray-400)',
-                  fontSize: '0.8rem' }}>剩余Token</span>
+                  fontSize: '0.8rem' }}>剩余 Token</span>
                 <div style={{ fontSize: '1.25rem', fontWeight: 600,
                   color: user?.remaining_tokens
                     && user.remaining_tokens < 1000
@@ -911,6 +912,13 @@ export default function Dashboard() {
                   )}
                 </div>
               </div>
+            </div>
+            <div style={{ 
+              marginTop: '1rem', 
+              paddingTop: '1rem', 
+              borderTop: '1px solid rgba(255,255,255,0.1)' 
+            }}>
+              <BadgeDisplay />
             </div>
           </div>
         </div>

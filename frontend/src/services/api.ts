@@ -2,7 +2,7 @@ import type {
   User, LoginResponse, RegisterResponse, TokenConfig, TokenStats,
   AdminUser, AdminTask, UsageStats, CalculateTokenResult, UsageHistory,
   Space, ContextMessage, ContextSettings, Notification,
-  IPBan, IPTracking, AuditLogEntry
+  IPBan, IPTracking, AuditLogEntry, AutoBanRule
 } from '../types/api'
 
 const API_BASE = ''
@@ -233,6 +233,52 @@ export const adminApi = {
   polishText: (data: { subject?: string; body?: string; style?: string }) =>
     request<{ subject?: string; body?: string }>('/api/admin/polish-text',
       { method: 'POST', body: JSON.stringify(data) }),
+
+  getSecurityConfig: () =>
+    request<{ config: Record<string, string> }>('/api/admin/security-config'),
+
+  updateSecurityConfig: (data: Record<string, string | number | boolean>) =>
+    request<{ message: string; updated: string[] }>('/api/admin/security-config',
+      { method: 'PUT', body: JSON.stringify(data) }),
+
+  // 自动封禁规则 API
+  getAutoBanRules: () =>
+    request<{ rules: AutoBanRule[] }>('/api/admin/auto-ban-rules'),
+
+  addAutoBanRule: (data: {
+    name: string;
+    description?: string;
+    trigger_honeypot?: boolean;
+    trigger_fake_report?: boolean;
+    user_agent_regex?: string;
+    vpn_score_threshold?: number;
+    ban_method?: '302' | 'timeout' | '403';
+    ban_duration_minutes?: number;
+    ban_reason?: string;
+  }) =>
+    request<{ rule: AutoBanRule; message: string }>('/api/admin/auto-ban-rules',
+      { method: 'POST', body: JSON.stringify(data) }),
+
+  updateAutoBanRule: (ruleId: number, data: Partial<{
+    name: string;
+    description: string;
+    is_active: boolean;
+    trigger_honeypot: boolean;
+    trigger_fake_report: boolean;
+    user_agent_regex: string;
+    vpn_score_threshold: number;
+    ban_method: '302' | 'timeout' | '403';
+    ban_duration_minutes: number;
+    ban_reason: string;
+  }>) =>
+    request<{ rule: AutoBanRule; message: string }>(`/api/admin/auto-ban-rules/${ruleId}`,
+      { method: 'PUT', body: JSON.stringify(data) }),
+
+  deleteAutoBanRule: (ruleId: number) =>
+    request<{ message: string }>(`/api/admin/auto-ban-rules/${ruleId}`, { method: 'DELETE' }),
+
+  toggleAutoBanRule: (ruleId: number) =>
+    request<{ message: string }>(`/api/admin/auto-ban-rules/${ruleId}/toggle`, { method: 'POST' }),
 }
 
 export const spaceApi = {
@@ -330,4 +376,9 @@ export const notificationApi = {
     request<{ message: string; token_amount: number }>(
       `/api/notifications/${id}/claim`,
       { method: 'POST' }),
+}
+
+export const badgeApi = {
+  getBadges: () =>
+    request<import('../types/api').BadgeResponse>('/api/badges'),
 }

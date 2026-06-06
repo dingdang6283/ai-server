@@ -4,60 +4,88 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="light">
+  <meta name="supported-color-schemes" content="light">
   <title>DingDang Cloud - Token 发放</title>
 </head>
-<body style="margin:0;padding:0;background-color:#f0f2f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;-webkit-font-smoothing:antialiased;">
-  <table role="presentation" style="width:100%;max-width:600px;margin:0 auto;border-collapse:collapse;">
+<body style="margin:0;padding:0;background-color:#f4f6fa;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Helvetica Neue',Arial,sans-serif;-webkit-font-smoothing:antialiased;">
+  <table role="presentation" style="width:100%;max-width:600px;margin:0 auto;border-collapse:collapse;" cellspacing="0" cellpadding="0">
+    <!-- 顶部品牌区 -->
     <tr>
-      <td style="padding:32px 16px 8px;text-align:center;">
-        <table role="presentation" style="width:100%;border-collapse:collapse;">
+      <td style="padding:40px 16px 16px;text-align:center;">
+        <table role="presentation" style="width:100%;border-collapse:collapse;" cellspacing="0" cellpadding="0">
           <tr>
             <td style="text-align:center;">
-              <div style="width:48px;height:48px;background:linear-gradient(135deg,#6366f1,#14b8a6);border-radius:12px;display:inline-block;line-height:48px;font-size:22px;color:#fff;font-weight:800;text-align:center;margin-bottom:8px;">D</div>
-              <div style="font-size:22px;font-weight:700;color:#1e293b;letter-spacing:-0.5px;">DingDang Cloud</div>
-              <p style="color:#94a3b8;font-size:13px;margin:2px 0 0;">千问API 智能中转平台</p>
+              <table role="presentation" style="margin:0 auto;border-collapse:collapse;" cellspacing="0" cellpadding="0">
+                <tr>
+                  <td style="width:52px;height:52px;background:linear-gradient(135deg,#6366f1,#8b5cf6);border-radius:14px;text-align:center;vertical-align:middle;">
+                    <span style="font-size:24px;color:#fff;font-weight:800;line-height:52px;">D</span>
+                  </td>
+                </tr>
+              </table>
+              <div style="font-size:20px;font-weight:700;color:#1e293b;letter-spacing:-0.3px;margin-top:12px;">DingDang Cloud</div>
+              <p style="color:#94a3b8;font-size:13px;margin:4px 0 0;">智能 AI 中转平台</p>
             </td>
           </tr>
         </table>
       </td>
     </tr>
+
+    <!-- 主卡片 -->
     <tr>
-      <td style="padding:12px 16px;">
-        <table role="presentation" style="width:100%;background:#ffffff;border-radius:16px;box-shadow:0 4px 16px rgba(0,0,0,0.06);border-collapse:collapse;overflow:hidden;">
+      <td style="padding:8px 16px;">
+        <table role="presentation" style="width:100%;background:#ffffff;border-radius:20px;box-shadow:0 8px 32px rgba(0,0,0,0.08);border-collapse:collapse;overflow:hidden;" cellspacing="0" cellpadding="0">
+          <!-- 顶部装饰渐变条 -->
           <tr>
             <td style="padding:0;">
-              <div style="height:4px;background:linear-gradient(90deg,#f59e0b,#6366f1,#14b8a6);"></div>
+              <table role="presentation" style="width:100%;height:6px;border-collapse:collapse;" cellspacing="0" cellpadding="0">
+                <tr>
+                  <td style="background:linear-gradient(90deg,#f59e0b,#6366f1,#8b5cf6);height:6px;padding:0;"></td>
+                </tr>
+              </table>
             </td>
           </tr>
           <tr>
-            <td style="padding:32px 32px 24px;">
-              <div style="width:56px;height:56px;background:#fefce8;border-radius:14px;display:flex;align-items:center;justify-content:center;margin-bottom:20px;">
-                <span style="font-size:28px;">🎁</span>
-              </div>
-              <h2 style="font-size:20px;color:#0f172a;margin:0 0 6px;font-weight:700;">{{SUBJECT}}</h2>
-              <div style="color:#475569;font-size:14px;line-height:1.8;margin:0 0 20px;white-space:pre-wrap;">{{BODY}}</div>
-
-              <table role="presentation" style="width:100%;background:linear-gradient(135deg,#eef2ff,#f0fdf4);border-radius:12px;border-collapse:collapse;margin-bottom:24px;border:1px solid #e0e7ff;">
+            <td style="padding:36px 36px 28px;">
+              <!-- 图标 -->
+              <table role="presentation" style="width:60px;height:60px;background:linear-gradient(135deg,#fefce8,#fef3c7);border-radius:16px;margin-bottom:20px;" cellspacing="0" cellpadding="0">
                 <tr>
-                  <td style="padding:20px;text-align:center;">
-                    <p style="color:#64748b;font-size:13px;margin:0 0 8px;">🎉 您获得的 Token 数量</p>
-                    <div style="font-size:40px;font-weight:800;background:linear-gradient(135deg,#6366f1,#14b8a6);-webkit-background-clip:text;background-clip:text;color:transparent;line-height:1.2;">
-                      {{TOKEN_AMOUNT}}
-                    </div>
-                    <p style="color:#94a3b8;font-size:12px;margin:4px 0 0;">可随时使用，永不过期</p>
+                  <td style="text-align:center;vertical-align:middle;">
+                    <span style="font-size:30px;line-height:60px;">🎁</span>
                   </td>
                 </tr>
               </table>
 
-              <table role="presentation" style="width:100%;border-collapse:collapse;margin-bottom:16px;">
+              <!-- 标题 -->
+              <h2 style="font-size:22px;color:#0f172a;margin:0 0 8px;font-weight:700;">{{SUBJECT}}</h2>
+
+              <!-- 内容 -->
+              <div style="color:#475569;font-size:15px;line-height:1.8;margin:0 0 28px;white-space:pre-wrap;">
+                {{BODY}}
+              </div>
+
+              <!-- Token 数量展示区域 -->
+              <table role="presentation" style="width:100%;background:linear-gradient(135deg,#eef2ff,#f0fdf4);border-radius:16px;border:1px solid #e0e7ff;margin-bottom:28px;" cellspacing="0" cellpadding="0">
+                <tr>
+                  <td style="text-align:center;padding:28px 20px;">
+                    <p style="color:#64748b;font-size:13px;margin:0 0 10px;letter-spacing:1px;">🎉 您获得的 Token 数量</p>
+                    <div style="font-size:48px;font-weight:800;background:linear-gradient(135deg,#6366f1,#8b5cf6,#a78bfa);-webkit-background-clip:text;background-clip:text;color:transparent;line-height:1.1;letter-spacing:-2px;">
+                      {{TOKEN_AMOUNT}}
+                    </div>
+                    <p style="color:#94a3b8;font-size:13px;margin:8px 0 0;">可随时使用，永不过期</p>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- 领取按钮 -->
+              <table role="presentation" style="width:100%;border-collapse:collapse;margin-bottom:20px;" cellspacing="0" cellpadding="0">
                 <tr>
                   <td style="text-align:center;">
-                    <table role="presentation" style="display:inline-block;border-collapse:collapse;">
+                    <table role="presentation" style="display:inline-block;border-collapse:collapse;" cellspacing="0" cellpadding="0">
                       <tr>
-                        <td style="border-radius:12px;background:linear-gradient(135deg,#6366f1,#4f46e5);padding:0;">
+                        <td style="border-radius:14px;background:linear-gradient(135deg,#6366f1,#4f46e5);padding:0;">
                           <a href="{{CLAIM_URL}}" target="_blank"
-                             style="display:inline-block;padding:14px 40px;font-size:16px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:12px;background:linear-gradient(135deg,#6366f1,#4f46e5);">
-                            点击领取 Token
+                             style="display:inline-block;padding:16px 48px;font-size:17px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:14px;background:linear-gradient(135deg,#6366f1,#4f46e5);letter-spacing:0.5px;">
+                            🎯 立即领取 Token
                           </a>
                         </td>
                       </tr>
@@ -66,27 +94,46 @@
                 </tr>
               </table>
 
-              <table role="presentation" style="width:100%;background:#fef2f2;border-radius:10px;border-collapse:collapse;margin-bottom:16px;">
+              <!-- 有效期提醒 -->
+              <table role="presentation" style="width:100%;background:#fef2f2;border-radius:12px;border:1px solid #fecaca;margin-bottom:20px;" cellspacing="0" cellpadding="0">
                 <tr>
-                  <td style="padding:12px 16px;">
-                    <p style="color:#dc2626;font-size:13px;line-height:1.5;margin:0;">
-                      <strong>⏰ 此链接有效期为 1 小时</strong>，请尽快领取。每个链接仅可使用一次。
-                    </p>
+                  <td style="padding:14px 18px;">
+                    <table role="presentation" style="width:100%;border-collapse:collapse;" cellspacing="0" cellpadding="0">
+                      <tr>
+                        <td style="vertical-align:top;width:24px;">
+                          <span style="font-size:16px;">⏰</span>
+                        </td>
+                        <td>
+                          <p style="color:#dc2626;font-size:13px;line-height:1.6;margin:0;">
+                            <strong>此链接有效期为 1 小时</strong>，请尽快领取。每个链接仅可使用一次。
+                          </p>
+                        </td>
+                      </tr>
+                    </table>
                   </td>
                 </tr>
               </table>
 
-              <p style="color:#94a3b8;font-size:12px;line-height:1.6;margin:0;border-top:1px solid #f1f5f9;padding-top:16px;">
-                如果按钮无法点击，请复制以下链接到浏览器中打开：<br>
-                <span style="color:#6366f1;word-break:break-all;font-size:11px;">{{CLAIM_URL}}</span>
-              </p>
+              <!-- 备用链接 -->
+              <table role="presentation" style="width:100%;border-collapse:collapse;" cellspacing="0" cellpadding="0">
+                <tr>
+                  <td style="border-top:1px solid #f1f5f9;padding:16px 0 0;">
+                    <p style="color:#94a3b8;font-size:12px;line-height:1.6;margin:0;">
+                      如果按钮无法点击，请复制以下链接到浏览器中打开：<br>
+                      <span style="color:#6366f1;word-break:break-all;font-size:11px;">{{CLAIM_URL}}</span>
+                    </p>
+                  </td>
+                </tr>
+              </table>
             </td>
           </tr>
         </table>
       </td>
     </tr>
+
+    <!-- 底部版权 -->
     <tr>
-      <td style="padding:16px;text-align:center;">
+      <td style="padding:20px 16px 32px;text-align:center;">
         <p style="color:#94a3b8;font-size:12px;margin:0 0 4px;">&copy; 2026 DingDang Cloud. All rights reserved.</p>
         <p style="color:#cbd5e1;font-size:11px;margin:0;">此邮件由系统自动发送，请勿回复。</p>
       </td>

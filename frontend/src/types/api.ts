@@ -147,6 +147,40 @@ export interface ApiError {
   error: string
 }
 
+export interface Badge {
+  id: string
+  name: string
+  desc: string
+  icon: string
+  type: 'normal_easy' | 'normal_hard' | 'hacker'
+  unlocked_at?: string
+}
+
+export interface BadgeResponse {
+  badges: Badge[]
+  total: number
+  total_normal: number
+  total_hacker: number
+  max_normal: number
+  max_hacker: number
+}
+
+export interface AutoBanRule {
+  id: number
+  name: string
+  description?: string
+  trigger_honeypot?: boolean
+  trigger_fake_report?: boolean
+  user_agent_regex?: string
+  vpn_score_threshold?: number
+  ban_method?: '302' | 'timeout' | '403'
+  ban_duration_minutes?: number
+  ban_reason?: string
+  is_active: boolean
+  created_at?: string
+  updated_at?: string
+}
+
 export interface IPBan {
   id: number
   ip_address: string
@@ -166,6 +200,15 @@ export interface IPTracking {
   user_agents: string
   first_seen: string
   last_seen: string
+  ip_type?: string
+  vpn_score?: number
+  country?: string
+  region?: string
+  city?: string
+  isp?: string
+  is_proxy?: number
+  is_vpn?: number
+  is_datacenter?: number
 }
 
 export interface AuditLogEntry {

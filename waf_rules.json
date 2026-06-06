@@ -1,0 +1,463 @@
+{
+  "version": "1.0.0",
+  "updated_at": "2026-06-05",
+  "description": "DingDang Cloud WAF 规则配置",
+  
+  "ip_validation": {
+    "enabled": true,
+    "cache_ttl_seconds": 86400,
+    "check_on_first_access": true,
+    "api_endpoint": "http://ip-api.com/json/{ip}",
+    "api_timeout": 5,
+    "api_fields": "status,country,countryCode,regionName,city,isp,org,as,proxy,hosting,mobile,query",
+    
+    "block_rules": {
+      "proxy": {
+        "enabled": true,
+        "action": "block",
+        "message": "检测到代理服务器访问，已拒绝"
+      },
+      "hosting": {
+        "enabled": false,
+        "action": "challenge",
+        "message": "检测到数据中心IP，需要验证"
+      },
+      "vpn_score_threshold": {
+        "enabled": true,
+        "threshold": 80,
+        "action": "block",
+        "message": "VPN风险评分过高，已拒绝"
+      },
+      "country_blacklist": {
+        "enabled": false,
+        "countries": ["XX", "YY"],
+        "action": "block",
+        "message": "该地区访问受限"
+      }
+    },
+    
+    "high_risk_asns": [
+      {"asn": "AS199524", "name": "G-Core Labs", "risk_score": 70, "reason": "VPS/VPN提供商"},
+      {"asn": "AS212238", "name": "Datacamp Limited", "risk_score": 75, "reason": "代理服务"},
+      {"asn": "AS62240", "name": "Leaseweb", "risk_score": 60, "reason": "托管服务"},
+      {"asn": "AS24940", "name": "Hetzner", "risk_score": 55, "reason": "VPS提供商"},
+      {"asn": "AS20473", "name": "Vultr", "risk_score": 55, "reason": "VPS提供商"},
+      {"asn": "AS14061", "name": "DigitalOcean", "risk_score": 55, "reason": "VPS提供商"},
+      {"asn": "AS63949", "name": "Linode", "risk_score": 55, "reason": "VPS提供商"},
+      {"asn": "AS16276", "name": "OVH", "risk_score": 55, "reason": "VPS提供商"},
+      {"asn": "AS13335", "name": "Cloudflare", "risk_score": 30, "reason": "CDN服务"},
+      {"asn": "AS15169", "name": "Google Cloud", "risk_score": 40, "reason": "云服务"},
+      {"asn": "AS16509", "name": "AWS", "risk_score": 40, "reason": "云服务"}
+    ]
+  },
+  
+  "attack_rules": {
+    "sql_injection": {
+      "enabled": true,
+      "severity": "critical",
+      "action": "block",
+      "patterns": [
+        "(?i)(union\\s+(all\\s+)?select)",
+        "(?i)(select\\s+.+\\s+from)",
+        "(?i)(insert\\s+into)",
+        "(?i)(delete\\s+from)",
+        "(?i)(drop\\s+(table|database))",
+        "(?i)(truncate\\s+table)",
+        "(?i)(update\\s+.+\\s+set)",
+        "(?i)(or\\s+1\\s*=\\s*1)",
+        "(?i)(and\\s+1\\s*=\\s*1)",
+        "(?i)(\\'\\s*or\\s*\\')",
+        "(?i)(\\\"\\s*or\\s*\\\")",
+        "(?i)(--\\s*$)",
+        "(?i)(/\\*.*\\*/)",
+        "(?i)(exec\\s*\\()",
+        "(?i)(execute\\s+)",
+        "(?i)(xp_cmdshell)",
+        "(?i)(waitfor\\s+delay)",
+        "(?i)(benchmark\\s*\\()",
+        "(?i)(sleep\\s*\\()",
+        "(?i)(load_file\\s*\\()",
+        "(?i)(into\\s+outfile)",
+        "(?i)(into\\s+dumpfile)"
+      ],
+      "excluded_paths": ["/api/chat", "/v1/chat/completions"],
+      "message": "检测到SQL注入攻击尝试"
+    },
+    
+    "xss": {
+      "enabled": true,
+      "severity": "high",
+      "action": "block",
+      "patterns": [
+        "(?i)<script[^>]*>.*?</script>",
+        "(?i)<script[^>]*>",
+        "(?i)javascript\\s*:",
+        "(?i)vbscript\\s*:",
+        "(?i)on(load|error|click|mouse|focus|blur|key|submit|reset|change|select)\\s*=",
+        "(?i)<iframe[^>]*>",
+        "(?i)<object[^>]*>",
+        "(?i)<embed[^>]*>",
+        "(?i)<form[^>]*>",
+        "(?i)<img[^>]*onerror\\s*=",
+        "(?i)<svg[^>]*onload\\s*=",
+        "(?i)<body[^>]*onload\\s*=",
+        "(?i)expression\\s*\\(",
+        "(?i)document\\.(cookie|location|write)",
+        "(?i)window\\.(location|open)",
+        "(?i)eval\\s*\\(",
+        "(?i)fromcharcode\\s*\\(",
+        "(?i)&#\\d+;",
+        "(?i)&#x[0-9a-f]+;"
+      ],
+      "message": "检测到XSS攻击尝试"
+    },
+    
+    "path_traversal": {
+      "enabled": true,
+      "severity": "critical",
+      "action": "block",
+      "patterns": [
+        "\\.\\./",
+        "\\.\\.\\\\",
+        "%2e%2e%2f",
+        "%2e%2e/",
+        "\\.\\.%2f",
+        "%2e%2e%5c",
+        "%252e%252e%252f",
+        "\\.\\./\\.\\./",
+        "/etc/passwd",
+        "/etc/shadow",
+        "/etc/hosts",
+        "/proc/self",
+        "/var/log",
+        "c:\\\\windows",
+        "c:/windows",
+        "\\\\127\\.0\\.0\\.1",
+        "file://"
+      ],
+      "message": "检测到路径遍历攻击"
+    },
+    
+    "command_injection": {
+      "enabled": true,
+      "severity": "critical",
+      "action": "block",
+      "patterns": [
+        "(?i)[;&|`]\\s*(cat|ls|pwd|whoami|id|uname|wget|curl|nc|bash|sh|cmd|powershell)\\b",
+        "(?i)\\$\\([^)]+\\)",
+        "(?i)`[^`]+`",
+        "(?i)\\|\\s*(cat|ls|pwd|whoami|id|wget|curl|nc)",
+        "(?i);\\s*(cat|ls|pwd|whoami|id|wget|curl|nc)",
+        "(?i)&&\\s*(cat|ls|pwd|whoami|id|wget|curl|nc)",
+        "(?i)\\|\\|\\s*(cat|ls|pwd|whoami|id|wget|curl|nc)",
+        "(?i)>\\s*/dev/",
+        "(?i)2>&1",
+        "(?i)/bin/(ba)?sh",
+        "(?i)python\\s+-c\\s+",
+        "(?i)perl\\s+-e\\s+",
+        "(?i)ruby\\s+-e\\s+",
+        "(?i)php\\s+-r\\s+"
+      ],
+      "message": "检测到命令注入攻击"
+    },
+    
+    "prompt_injection": {
+      "enabled": true,
+      "severity": "high",
+      "action": "sanitize",
+      "patterns": [
+        "(?i)ignore\\s+(all\\s+)?(previous|prior|above)\\s+(instructions?|prompts?|rules?)",
+        "(?i)disregard\\s+(all\\s+)?(previous|prior|above)",
+        "(?i)forget\\s+(all\\s+)?(previous|prior|above)",
+        "(?i)you\\s+are\\s+now\\s+",
+        "(?i)act\\s+as\\s+(if|a|an)\\s+",
+        "(?i)pretend\\s+(to\\s+be|that)\\s+",
+        "(?i)simulate\\s+",
+        "(?i)role[\\s:-]*play",
+        "(?i)jailbreak",
+        "(?i)dank\\s+mode",
+        "(?i)developer\\s+mode",
+        "(?i)system\\s*:\\s*",
+        "(?i)\\[\\s*system\\s*\\]",
+        "(?i)<<\\s*system\\s*>>",
+        "(?i)override\\s+(default|system|safety)\\s*",
+        "(?i)bypass\\s+(filter|restriction|limit)\\s*",
+        "(?i)print\\s+(your|the)\\s+(system\\s+)?prompt",
+        "(?i)reveal\\s+(your|the)\\s+(system\\s+)?prompt",
+        "(?i)show\\s+(your|the)\\s+(system\\s+)?prompt",
+        "(?i)what\\s+is\\s+your\\s+(system\\s+)?prompt",
+        "(?i)repeat\\s+(the\\s+)?(above|previous|last)",
+        "(?i)output\\s+(your|the)\\s+instructions",
+        "(?i)###\\s*instruction",
+        "(?i)###\\s*system",
+        "(?i)NEW\\s+INSTRUCTION:",
+        "(?i)STOP\\s+!",
+        "(?i)EXECUTE\\s+:"
+      ],
+      "sanitize_replacement": "[已过滤]",
+      "message": "检测到提示词注入尝试，已过滤"
+    },
+    
+    "file_upload": {
+      "enabled": true,
+      "severity": "critical",
+      "action": "block",
+      "max_file_size_mb": 10,
+      "allowed_extensions": [
+        "jpg", "jpeg", "png", "gif", "webp", "bmp", "svg",
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+        "txt", "csv", "json", "xml", "md",
+        "zip", "tar", "gz", "rar"
+      ],
+      "blocked_extensions": [
+        "exe", "bat", "cmd", "com", "pif", "scr", "vbs", "js", "jar",
+        "php", "php3", "php4", "php5", "phtml", "phar",
+        "asp", "aspx", "ashx", "asmx", "axd",
+        "jsp", "jspx", "jspa", "jspf",
+        "py", "pyc", "pyo",
+        "rb", "pl", "cgi", "fcgi",
+        "sh", "bash", "zsh", "ksh",
+        "sql", "db", "sqlite", "sqlite3",
+        "htaccess", "htpasswd",
+        "shtml", "stm", "shtm",
+        "cs", "vb", "vbe", "vbscript",
+        "ps1", "psm1", "psd1"
+      ],
+      "check_magic_bytes": true,
+      "magic_bytes": {
+        "php": ["3c3f706870", "3c3f3d", "3c3f70"],
+        "exe": ["4d5a"],
+        "jar": ["504b0304", "504b0506"],
+        "pdf": ["25504446"],
+        "png": ["89504e47"],
+        "jpg": ["ffd8ff"],
+        "gif": ["47494638"],
+        "zip": ["504b0304"]
+      },
+      "message": "检测到危险文件上传"
+    },
+    
+    "sensitive_access": {
+      "enabled": true,
+      "severity": "critical",
+      "action": "block",
+      "patterns": [
+        "^/\\.env",
+        "^/\\.git",
+        "^/\\.svn",
+        "^/\\.hg",
+        "^/\\.bzr",
+        "^/config\\.",
+        "^/configuration\\.",
+        "^/settings\\.",
+        "^/database\\.",
+        "^/db\\.",
+        "^/backup",
+        "^/\\.backup",
+        "^/dump\\.",
+        "^/\\.dump",
+        "^/sql\\.",
+        "^/\\.sql",
+        "^/\\.htaccess",
+        "^/\\.htpasswd",
+        "^/wp-config",
+        "^/web\\.config",
+        "^/php\\.ini",
+        "^/phpinfo",
+        "^/server-status",
+        "^/server-info",
+        "^/\\.well-known/security",
+        "^/actuator",
+        "^/debug",
+        "^/trace",
+        "^/heapdump",
+        "^/jolokia",
+        "^/console",
+        "^/adminer",
+        "^/pma",
+        "^/phpmyadmin",
+        "^/myadmin",
+        "^/mysql",
+        "^/manager",
+        "^/manager/html",
+        "^/host-manager",
+        "^/shell",
+        "^/cmd",
+        "^/backdoor",
+        "^/webshell",
+        "^/c99",
+        "^/r57",
+        "^/b374k",
+        "^/\\.ssh",
+        "^/id_rsa",
+        "^/id_dsa",
+        "^/\\.pgp",
+        "^/\\.gnupg",
+        "^/credentials",
+        "^/\\.aws",
+        "^/\\.docker",
+        "^/\\.kube",
+        "^/terraform",
+        "^/ansible"
+      ],
+      "message": "检测到敏感路径访问"
+    },
+    
+    "http_method": {
+      "enabled": true,
+      "severity": "medium",
+      "action": "block",
+      "allowed_methods": ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+      "blocked_methods": ["TRACE", "TRACK", "CONNECT"],
+      "message": "不允许的HTTP方法"
+    },
+    
+    "header_injection": {
+      "enabled": true,
+      "severity": "high",
+      "action": "block",
+      "patterns": [
+        "(?i)\\r\\n",
+        "(?i)\\n\\r",
+        "(?i)content-length:\\s*-",
+        "(?i)transfer-encoding:\\s*chunked",
+        "(?i)host:\\s*localhost",
+        "(?i)host:\\s*127\\.",
+        "(?i)host:\\s*0\\.0\\.0\\.0",
+        "(?i)host:\\s*\\[::\\]",
+        "(?i)x-forwarded-for:\\s*,",
+        "(?i)authorization:\\s*basic\\s+[\\r\\n]"
+      ],
+      "message": "检测到HTTP头注入"
+    },
+    
+    "nosql_injection": {
+      "enabled": true,
+      "severity": "critical",
+      "action": "block",
+      "patterns": [
+        "^\\$where",
+        "^\\$ne",
+        "^\\$gt",
+        "^\\$gte",
+        "^\\$lt",
+        "^\\$lte",
+        "^\\$in",
+        "^\\$nin",
+        "^\\$exists",
+        "^\\$regex",
+        "^\\$expr",
+        "^\\$jsonSchema",
+        "^\\$all",
+        "^\\$elemMatch",
+        "^\\$size",
+        "^\\$type",
+        "^\\$mod",
+        "^\\$not",
+        "^\\$or",
+        "^\\$and",
+        "^\\$nor",
+        "^\\$comment"
+      ],
+      "message": "检测到NoSQL注入尝试"
+    },
+    
+    "ldap_injection": {
+      "enabled": true,
+      "severity": "high",
+      "action": "block",
+      "patterns": [
+        "(?i)\\(\\|\\(",
+        "(?i)\\(&\\(",
+        "(?i)\\)\\(",
+        "(?i)\\*\\)\\(",
+        "(?i)\\(cn=\\*\\)",
+        "(?i)\\(objectclass=\\*\\)",
+        "(?i)\\(\\|\\(cn=\\)",
+        "(?i)\\)\\|\\(",
+        "(?i)\\(\\&\\(cn=\\)",
+        "(?i)\\)\\&\\("
+      ],
+      "message": "检测到LDAP注入尝试"
+    },
+    
+    "xxe": {
+      "enabled": true,
+      "severity": "critical",
+      "action": "block",
+      "patterns": [
+        "(?i)<!ENTITY",
+        "(?i)<!DOCTYPE[^>]+\\[",
+        "(?i)SYSTEM\\s+\"",
+        "(?i)SYSTEM\\s+'",
+        "(?i)PUBLIC\\s+\"",
+        "(?i)PUBLIC\\s+'",
+        "(?i)<!ATTLIST",
+        "(?i)<!ELEMENT",
+        "(?i)<?xml",
+        "(?i)encoding\\s*=\\s*\"UTF-16\"",
+        "(?i)encoding\\s*=\\s*\"UTF-32\""
+      ],
+      "message": "检测到XXE攻击尝试"
+    },
+    
+    "ssrf": {
+      "enabled": true,
+      "severity": "high",
+      "action": "block",
+      "patterns": [
+        "(?i)^https?://127\\.",
+        "(?i)^https?://localhost",
+        "(?i)^https?://0\\.0\\.0\\.0",
+        "(?i)^https?://\\[::\\]",
+        "(?i)^https?://\\[::1\\]",
+        "(?i)^https?://169\\.254\\.",
+        "(?i)^https?://10\\.",
+        "(?i)^https?://172\\.(1[6-9]|2[0-9]|3[01])\\.",
+        "(?i)^https?://192\\.168\\.",
+        "(?i)^https?://0x",
+        "(?i)^https?://0o",
+        "(?i)^https?://@",
+        "(?i)^file://",
+        "(?i)^gopher://",
+        "(?i)^dict://",
+        "(?i)^sftp://",
+        "(?i)^tftp://",
+        "(?i)^ldap://",
+        "(?i)^jar://"
+      ],
+      "message": "检测到SSRF攻击尝试"
+    }
+  },
+  
+  "rate_limit": {
+    "enabled": true,
+    "default": {
+      "requests_per_minute": 60,
+      "requests_per_hour": 1000,
+      "requests_per_day": 10000
+    },
+    "by_endpoint": {
+      "/api/auth/login": {"requests_per_minute": 5, "requests_per_hour": 20},
+      "/api/auth/register": {"requests_per_minute": 2, "requests_per_hour": 10},
+      "/api/chat": {"requests_per_minute": 10, "requests_per_hour": 200},
+      "/v1/chat/completions": {"requests_per_minute": 10, "requests_per_hour": 200},
+      "/api/upload": {"requests_per_minute": 5, "requests_per_hour": 50}
+    }
+  },
+  
+  "response_headers": {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "X-XSS-Protection": "1; mode=block",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "geolocation=(), microphone=(), camera=()"
+  },
+  
+  "logging": {
+    "log_blocked_requests": true,
+    "log_all_requests": false,
+    "log_body_on_attack": true,
+    "max_body_log_size": 4096
+  }
+}

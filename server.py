@@ -28,6 +28,7 @@ import threading
 import hmac
 import base64
 import random
+import queue as _queue
 import string
 import io
 import tempfile
@@ -137,12 +138,269 @@ else:
 DB_PATH = os.path.abspath(db_path)
 FRONTEND_DIST = os.path.join(base_dir, 'frontend', 'dist')
 
+# ==================== 彩色日志格式化器 ====================
+
+# 高危 IP 缓存（全局共享）
+_high_risk_ips = set()
+
+def add_high_risk_ip(ip):
+    """添加高危 IP 到缓存"""
+    _high_risk_ips.add(ip)
+
+def is_high_risk_ip(ip):
+    """检查 IP 是否是高危 IP"""
+    return ip in _high_risk_ips
+
+class ColoredFormatter(logging.Formatter):
+    """智能彩色日志格式化器 - 根据日志内容自动应用不同颜色"""
+    # ANSI 颜色码
+    COLORS = {
+        'DEBUG': '\033[36m',      # 青色
+        'INFO': '\033[32m',       # 绿色
+        'WARNING': '\033[33m',    # 黄色
+        'ERROR': '\033[31m',      # 红色
+        'CRITICAL': '\033[35m',   # 紫色
+    }
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+    
+    # 内容特定颜色
+    IP_NORMAL = '\033[36m'        # 青色 - 普通 IP
+    IP_HIGH_RISK = '\033[31m'     # 红色 - 高危 IP
+    HTTP_GET = '\033[32m'         # 绿色 - GET 请求
+    HTTP_POST = '\033[33m'        # 黄色 - POST 请求
+    HTTP_PUT = '\033[34m'         # 蓝色 - PUT 请求
+    HTTP_DELETE = '\033[31m'      # 红色 - DELETE 请求
+    HTTP_PATCH = '\033[35m'       # 紫色 - PATCH 请求
+    HTTP_HEAD = '\033[36m'        # 青色 - HEAD 请求
+    HTTP_OPTIONS = '\033[37m'     # 白色 - OPTIONS 请求
+    STATUS_2XX = '\033[32m'       # 绿色 - 成功
+    STATUS_3XX = '\033[34m'       # 蓝色 - 重定向
+    STATUS_4XX = '\033[33m'       # 黄色 - 客户端错误
+    STATUS_5XX = '\033[31m'       # 红色 - 服务器错误
+    LOCATION_INFO = '\033[37m'    # 白色 - 地理位置信息
+    VPN_INFO = '\033[33m'         # 黄色 - VPN 信息
+    ISP_INFO = '\033[36m'         # 青色 - ISP 信息
+    BROADBAND_INFO = '\033[34m'   # 蓝色 - 宽带类型信息
+
+    def __init__(self, fmt=None, datefmt=None, use_color=True):
+        super().__init__(fmt, datefmt)
+        self.use_color = use_color
+
+    def _colorize_ip(self, text):
+        """为 IP 地址着色，高危 IP 使用红色"""
+        import re
+        
+        def replace_ip(match):
+            ip = match.group(0)
+            # 检查是否在全局高危 IP 缓存中
+            is_high_risk = is_high_risk_ip(ip)
+            
+            color = self.IP_HIGH_RISK if is_high_risk else self.IP_NORMAL
+            return f"{color}{ip}{self.RESET}"
+        
+        # 匹配 IPv4 地址
+        ip_pattern = r'\b(?:\d{1,3}\.){3}\d{1,3}\b'
+        return re.sub(ip_pattern, replace_ip, text)
+
+    def _colorize_http_method(self, text):
+        """为 HTTP 请求方法着色"""
+        methods = {
+            'GET': self.HTTP_GET,
+            'POST': self.HTTP_POST,
+            'PUT': self.HTTP_PUT,
+            'DELETE': self.HTTP_DELETE,
+            'PATCH': self.HTTP_PATCH,
+            'HEAD': self.HTTP_HEAD,
+            'OPTIONS': self.HTTP_OPTIONS,
+        }
+        
+        for method, color in methods.items():
+            if method in text:
+                text = text.replace(method, f"{color}{method}{self.RESET}")
+        return text
+
+    def _colorize_status_code(self, text):
+        """为 HTTP 状态码着色"""
+        import re
+        
+        def replace_status(match):
+            status = match.group(1)
+            status_int = int(status)
+            
+            if 200 <= status_int < 300:
+                color = self.STATUS_2XX
+            elif 300 <= status_int < 400:
+                color = self.STATUS_3XX
+            elif 400 <= status_int < 500:
+                color = self.STATUS_4XX
+            elif 500 <= status_int < 600:
+                color = self.STATUS_5XX
+            else:
+                color = self.RESET
+            
+            return f"{color}{status}{self.RESET}"
+        
+        # 匹配 HTTP 状态码（通常在 HTTP/1.1" 后面）
+        status_pattern = r'HTTP/1\.1" (\d{3})'
+        return re.sub(status_pattern, replace_status, text)
+
+    def _colorize_location_info(self, text):
+        """为地理位置信息着色"""
+        # 地理位置信息格式：Country-CountryCode-Region-City
+        # 例如：China-CN-Shanghai-Shanghai
+        # 完整格式：IP -- Country-CN-Region-City--ISP-Type-VPN:XX
+        
+        import re
+        
+        def replace_location(match):
+            location = match.group(1)
+            return f"-- {self.LOCATION_INFO}{location}{self.RESET}--"
+        
+        # 匹配地理位置信息：IP -- Location--
+        # 格式：xxx -- China-CN-Shanghai-Shanghai--
+        location_pattern = r'-- ([A-Za-z\u4e00-\u9fa5]+-[A-Za-z]+-[A-Za-z\u4e00-\u9fa5]+-[A-Za-z\u4e00-\u9fa5]+)--'
+        text = re.sub(location_pattern, replace_location, text)
+        
+        return text
+
+    def _colorize_vpn_info(self, text):
+        """为 VPN 信息着色"""
+        import re
+        
+        def replace_vpn(match):
+            vpn_text = match.group(0)
+            return f"{self.VPN_INFO}{vpn_text}{self.RESET}"
+        
+        # 匹配 VPN:XX
+        vpn_pattern = r'VPN:\d+'
+        return re.sub(vpn_pattern, replace_vpn, text)
+
+    def _colorize_isp_info(self, text):
+        """为 ISP 信息着色"""
+        # ISP 信息格式：--ISP-Type-VPN:
+        # 例如：--China-普通宽带 -VPN:0
+        # 完整：Location--ISP-Type-VPN:XX
+        import re
+        
+        def replace_isp(match):
+            isp = match.group(1)
+            bb_type = match.group(2)
+            return f"--{self.ISP_INFO}{isp}{self.RESET}-{self.BROADBAND_INFO}{bb_type}{self.RESET}-{self.VPN_INFO}"
+        
+        # 匹配 ISP 和宽带类型：--ISP-Type-VPN:
+        isp_pattern = r'--([A-Za-z\u4e00-\u9fa5]+)-([数据中心代理普通宽带]+)-VPN:'
+        text = re.sub(isp_pattern, replace_isp, text)
+        
+        return text
+
+    def _colorize_broadband_info(self, text):
+        """为宽带类型信息着色"""
+        broadband_types = ['普通宽带', '数据中心', '代理']
+        
+        for bb_type in broadband_types:
+            if bb_type in text:
+                text = text.replace(bb_type, f"{self.BROADBAND_INFO}{bb_type}{self.RESET}")
+        return text
+
+    def _colorize_message_content(self, msg):
+        """根据日志内容智能着色"""
+        if not self.use_color:
+            return msg
+        
+        # 按顺序应用各种着色
+        msg = self._colorize_http_method(msg)
+        msg = self._colorize_status_code(msg)
+        msg = self._colorize_location_info(msg)
+        msg = self._colorize_vpn_info(msg)
+        msg = self._colorize_isp_info(msg)
+        msg = self._colorize_broadband_info(msg)
+        msg = self._colorize_ip(msg)
+        
+        return msg
+
+    def format(self, record):
+        import re
+        
+        # 先调用父类方法，确保 asctime 等属性已生成
+        if self.use_color:
+            # 为日志级别添加颜色
+            color = self.COLORS.get(record.levelname, self.RESET)
+            record.levelname = f"{self.BOLD}{color}{record.levelname}{self.RESET}"
+            
+            # 判断消息是否包含需要智能着色的元素（IP 地址）
+            msg_str = str(record.msg) if record.msg else ''
+            has_ip = bool(re.search(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', msg_str))
+            
+            # 对于包含 IP 的日志，不应用级别颜色包裹，让内容着色函数处理
+            # 对于普通日志，应用级别颜色包裹
+            if record.levelno >= logging.ERROR:
+                if not has_ip:
+                    record.msg = f"{color}{record.msg}{self.RESET}"
+            elif record.levelno >= logging.WARNING:
+                if not has_ip:
+                    record.msg = f"{color}{record.msg}{self.RESET}"
+            elif record.levelno >= logging.INFO:
+                # INFO 级别也添加颜色，但包含 IP 的日志除外
+                if not has_ip:
+                    record.msg = f"{color}{record.msg}{self.RESET}"
+
+        # 格式化日志
+        result = super().format(record)
+
+        if self.use_color:
+            # 为时间添加暗淡颜色（在格式化后替换）
+            time_pattern = r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})'
+            result = re.sub(time_pattern, f'{self.DIM}\\1{self.RESET}', result)
+            
+            # 智能内容着色
+            # 找到消息部分并应用内容特定颜色
+            # 格式：时间 - 名称 - 级别 - 消息
+            parts = result.split(' - ', 3)
+            if len(parts) == 4:
+                prefix = ' - '.join(parts[:3]) + ' - '
+                message = parts[3]
+                colored_message = self._colorize_message_content(message)
+                result = prefix + colored_message
+
+        return result
+
+# 检测是否支持颜色（Windows 需要特殊处理）
+def supports_color():
+    """检测终端是否支持颜色"""
+    import sys
+    if sys.platform == 'win32':
+        # Windows 10+ 支持 ANSI 颜色
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+            return True
+        except:
+            return False
+    # Unix/Linux/macOS 通常支持颜色
+    return hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
+
+# 配置日志
+use_color = supports_color()
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(ColoredFormatter(
+    fmt='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    use_color=use_color
+))
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
+    handlers=[console_handler]
 )
 logger = logging.getLogger(__name__)
+
+# 为 werkzeug 的 logger 也应用彩色格式化（Flask 的 HTTP 请求日志）
+werkzeug_logger = logging.getLogger('werkzeug')
+werkzeug_logger.handlers = []  # 清除默认 handler
+werkzeug_logger.addHandler(console_handler)
+werkzeug_logger.setLevel(logging.INFO)
 
 import sys
 if sys.platform == 'win32':
@@ -356,6 +614,16 @@ def init_db():
             completion_tokens INTEGER DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS token_usage_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            tokens INTEGER NOT NULL,
+            space_id INTEGER,
+            request_id TEXT,
+            signature TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
         CREATE TABLE IF NOT EXISTS user_concurrent (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
@@ -554,6 +822,87 @@ def init_db():
         )
     ''')
     conn.execute('''
+        CREATE TABLE IF NOT EXISTS ip_info (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip_address TEXT UNIQUE NOT NULL,
+            ip_type TEXT DEFAULT 'unknown',
+            vpn_score INTEGER DEFAULT 0,
+            country TEXT,
+            region TEXT,
+            city TEXT,
+            isp TEXT,
+            is_proxy INTEGER DEFAULT 0,
+            is_vpn INTEGER DEFAULT 0,
+            is_datacenter INTEGER DEFAULT 0,
+            raw_info TEXT,
+            checked_at TEXT DEFAULT (datetime('now')),
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS silent_operations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            real_ip TEXT NOT NULL,
+            detected_ip TEXT,
+            ip_source TEXT DEFAULT 'direct',
+            country TEXT,
+            region TEXT,
+            city TEXT,
+            isp TEXT,
+            user_agent TEXT,
+            browser_fingerprint TEXT,
+            screen_resolution TEXT,
+            timezone TEXT,
+            language TEXT,
+            platform TEXT,
+            endpoint TEXT,
+            method TEXT,
+            referer TEXT,
+            vpn_score INTEGER DEFAULT 0,
+            is_proxy INTEGER DEFAULT 0,
+            is_vpn INTEGER DEFAULT 0,
+            is_datacenter INTEGER DEFAULT 0,
+            access_time TEXT DEFAULT (datetime('now')),
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    ''')
+    conn.execute('''
+        CREATE INDEX IF NOT EXISTS idx_silent_ops_ip ON silent_operations(real_ip)
+    ''')
+    conn.execute('''
+        CREATE INDEX IF NOT EXISTS idx_silent_ops_time ON silent_operations(access_time)
+    ''')
+    conn.execute('''
+        CREATE INDEX IF NOT EXISTS idx_silent_ops_session ON silent_operations(session_id)
+    ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS ip_auto_ban_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            description TEXT,
+            is_active INTEGER DEFAULT 1,
+            trigger_honeypot INTEGER DEFAULT 0,
+            trigger_fake_report INTEGER DEFAULT 0,
+            user_agent_regex TEXT,
+            vpn_score_threshold INTEGER DEFAULT 0,
+            ban_method TEXT NOT NULL DEFAULT '302',
+            ban_duration_minutes INTEGER DEFAULT 60,
+            ban_reason TEXT DEFAULT '触发自动封禁规则',
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        )
+    ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS system_config (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            config_key TEXT UNIQUE NOT NULL,
+            config_value TEXT NOT NULL,
+            description TEXT,
+            updated_at TEXT DEFAULT (datetime('now'))
+        )
+    ''')
+    conn.execute('''
         CREATE TABLE IF NOT EXISTS admin_tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
@@ -613,7 +962,119 @@ def init_db():
 
     conn.close()
 
-# ==================== 获取客户端真实IP ====================
+# ==================== IP 地址异步解析 ====================
+
+class IPResolver:
+    """异步 IP 地址解析器：后台线程解析 + 延迟日志输出"""
+
+    def __init__(self):
+        self.cache = {}
+        self.cache_lock = threading.Lock()
+        self._queue = _queue.Queue(maxsize=1000)
+        self._pending_lock = threading.Lock()
+        self._pending_logs = {}
+        self._worker = threading.Thread(target=self._worker_loop, daemon=True)
+        self._worker.start()
+
+    def _fetch_info(self, ip):
+        try:
+            params = {'fields': 'status,country,countryCode,regionName,city,isp,org,as,proxy,hosting,mobile'}
+            resp = requests.get(f'http://ip-api.com/json/{ip}', params=params, timeout=5,
+                              headers={'User-Agent': 'DingDangCloud/1.0'})
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get('status') == 'success':
+                    return data
+        except Exception:
+            pass
+        return None
+
+    def _format_log(self, ip, method, path, status, length, elapsed, date_str):
+        """格式化日志行"""
+        with self.cache_lock:
+            info = self.cache.get(ip)
+        if not info:
+            return None
+        country = info.get('country', '未知')
+        country_code = info.get('countryCode', '')
+        region = info.get('regionName', '')
+        city = info.get('city', '')
+        isp_raw = info.get('org') or info.get('isp') or '未知'
+        isp_short = isp_raw.split(' ')[0] if ' ' in isp_raw else isp_raw
+        ip_type = '数据中心' if info.get('hosting') else '代理' if info.get('proxy') else '普通宽带'
+        vpn_score = 100 if info.get('proxy') else 50 if info.get('hosting') else 0
+        
+        # 检查是否是高危 IP，如果是则添加到全局缓存
+        is_high_risk = (
+            info.get('proxy') or 
+            info.get('hosting') or
+            vpn_score >= 50
+        )
+        if is_high_risk:
+            add_high_risk_ip(ip)
+        
+        prefix = f"{ip} -- {country}-{country_code}-{region}-{city}--{isp_short}-{ip_type}-VPN:{vpn_score}"
+        return '%s - - [%s] "%s %s HTTP/1.1" %s %s %.6f' % (
+            prefix, date_str, method, path, status, length, elapsed)
+
+    def _worker_loop(self):
+        while True:
+            try:
+                ip = self._queue.get(timeout=30)
+                if not ip or ip in ('127.0.0.1', '0.0.0.0', '::1', 'localhost'):
+                    continue
+                with self.cache_lock:
+                    if ip in self.cache:
+                        # 已缓存，但仍需输出延迟日志
+                        with self._pending_lock:
+                            pending = self._pending_logs.pop(ip, None)
+                        if pending:
+                            log_msg = self._format_log(*pending)
+                            if log_msg:
+                                logger.info(' [IP 解析] %s', log_msg)
+                                sys.stderr.flush()
+                        continue
+                info = self._fetch_info(ip)
+                with self.cache_lock:
+                    self.cache[ip] = info
+                # 解析完成，检查是否有待输出的详细日志
+                with self._pending_lock:
+                    pending = self._pending_logs.pop(ip, None)
+                if pending:
+                    log_msg = self._format_log(*pending)
+                    if log_msg:
+                        logger.info(' [IP 解析] %s', log_msg)
+            except _queue.Empty:
+                continue
+            except Exception:
+                continue
+
+    def log_and_resolve(self, client_ip, method, path, status, length, elapsed, date_str):
+        """记录日志并异步解析 IP"""
+        if not client_ip or client_ip in ('127.0.0.1', '0.0.0.0', '::1', 'localhost'):
+            return
+        
+        # 先输出原始 IP 日志（不阻塞）
+        log_msg = '%s - - [%s] "%s %s HTTP/1.1" %s %s %.6f' % (
+            client_ip, date_str, method, path, status, length, elapsed)
+        logger.info(log_msg)
+        
+        # 保存待处理的日志信息（用于解析完成后输出详细日志）
+        with self._pending_lock:
+            self._pending_logs[client_ip] = (client_ip, method, path, status, length, elapsed, date_str)
+        
+        # 后台异步解析
+        with self.cache_lock:
+            if client_ip in self.cache:
+                return
+        try:
+            self._queue.put_nowait(client_ip)
+        except _queue.Full:
+            pass
+
+ip_resolver = IPResolver()
+
+# ==================== 获取客户端真实 IP ====================
 
 def get_client_ip():
     proxy_protocol_version = CFG['app'].get('proxy_protocol_version', 0)
@@ -684,6 +1145,142 @@ def get_client_ip():
     if remote and is_valid_ip(remote):
         return remote
     return remote or '0.0.0.0'
+
+def get_real_ip_with_vpn_detection():
+    """
+    尝试获取用户真实 IP，即使使用了 VPN/代理
+    通过多种 HTTP 头和技术手段检测
+    """
+    real_ip = None
+    detected_ip = None
+    ip_source = 'direct'
+    
+    # 1. 首先尝试从标准代理头获取
+    forwarded_for = request.headers.get('X-Forwarded-For', '')
+    if forwarded_for:
+        ips = [ip.strip() for ip in forwarded_for.split(',')]
+        if len(ips) > 1:
+            # 如果有多个 IP，第一个通常是真实 IP（客户端 IP）
+            real_ip = ips[0]
+            detected_ip = ips[-1]  # 最后一个通常是出口 IP
+            ip_source = 'forwarded_for'
+    
+    # 2. 尝试从其他非标准头获取
+    if not real_ip:
+        for header in ['CF-Connecting-IP', 'True-Client-IP', 'X-Real-IP', 
+                      'X-Original-Forwarded-For', 'Forwarded']:
+            val = request.headers.get(header, '')
+            if val:
+                if ',' in val:
+                    real_ip = val.split(',')[0].strip()
+                else:
+                    real_ip = val.strip()
+                if real_ip and is_valid_ip(real_ip):
+                    ip_source = header.lower()
+                    break
+    
+    # 3. 如果没有找到转发 IP，使用 remote_addr
+    if not real_ip:
+        real_ip = request.remote_addr or '0.0.0.0'
+        ip_source = 'direct'
+    
+    # 4. 如果没有检测到转发的 IP，detected_ip 就是 real_ip
+    if not detected_ip:
+        detected_ip = real_ip
+    
+    return real_ip, detected_ip, ip_source
+
+def record_silent_operation(endpoint=None, method=None, session_id=None):
+    """
+    静默记录用户操作，不感知地收集信息
+    注意：此函数必须确保不影响正常请求处理
+    """
+    try:
+        # 获取真实 IP 和检测 IP
+        real_ip, detected_ip, ip_source = get_real_ip_with_vpn_detection()
+        
+        # 获取 User-Agent
+        user_agent = request.headers.get('User-Agent', '')
+        
+        # 获取浏览器指纹信息
+        fingerprint = request.headers.get('X-Fingerprint', '')
+        
+        # 获取其他客户端信息
+        screen_res = request.headers.get('X-Screen-Resolution', '')
+        timezone = request.headers.get('X-Timezone', '')
+        language = request.headers.get('Accept-Language', '')
+        platform = request.headers.get('X-Platform', request.headers.get('X-Client-Platform', ''))
+        
+        # 获取 IP 信息（从缓存或数据库）
+        ip_info = get_ip_info_from_db(real_ip)
+        country = ip_info.get('country') if ip_info else None
+        region = ip_info.get('region') if ip_info else None
+        city = ip_info.get('city') if ip_info else None
+        isp = ip_info.get('isp') if ip_info else None
+        vpn_score = ip_info.get('vpn_score', 0) if ip_info else 0
+        is_proxy = ip_info.get('is_proxy', 0) if ip_info else 0
+        is_vpn = ip_info.get('is_vpn', 0) if ip_info else 0
+        is_datacenter = ip_info.get('is_datacenter', 0) if ip_info else 0
+        
+        # 获取请求信息
+        if not endpoint:
+            endpoint = request.path
+        if not method:
+            method = request.method
+        referer = request.headers.get('Referer', '')
+        
+        # 插入数据库（使用独立连接，避免并发问题）
+        conn = get_db()
+        conn.execute("""
+            INSERT INTO silent_operations (
+                session_id, real_ip, detected_ip, ip_source,
+                country, region, city, isp,
+                user_agent, browser_fingerprint, screen_resolution,
+                timezone, language, platform,
+                endpoint, method, referer,
+                vpn_score, is_proxy, is_vpn, is_datacenter
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            session_id, real_ip, detected_ip, ip_source,
+            country, region, city, isp,
+            user_agent, fingerprint, screen_res,
+            timezone, language, platform,
+            endpoint, method, referer,
+            vpn_score, is_proxy, is_vpn, is_datacenter
+        ))
+        conn.commit()
+        
+        # 记录到日志（调试用，生产环境可以关闭）
+        logger.debug(f"[静默记录] {real_ip} ({detected_ip}) - {endpoint} - {user_agent[:50]}...")
+        
+    except Exception as e:
+        # 静默记录失败不应该影响正常请求
+        # 只记录到日志，不抛出异常
+        logger.error(f"[静默记录] 记录失败：{e}")
+
+def get_ip_info_from_db(ip_address):
+    """从数据库获取 IP 信息"""
+    try:
+        conn = get_db()
+        cursor = conn.execute(
+            'SELECT * FROM ip_info WHERE ip_address = ? ORDER BY checked_at DESC LIMIT 1',
+            (ip_address,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return {
+                'country': row[4],
+                'region': row[5],
+                'city': row[6],
+                'isp': row[7],
+                'vpn_score': row[8],
+                'is_proxy': row[9],
+                'is_vpn': row[10],
+                'is_datacenter': row[11]
+            }
+    except Exception as e:
+        logger.error(f"[IP 信息] 查询失败：{e}")
+    return None
 
 def is_valid_ip(ip: str) -> bool:
     import ipaddress
@@ -756,6 +1353,29 @@ def mask_api_key(api_key: str) -> str:
 def generate_email_code() -> str:
     return str(secrets.randbelow(900000) + 100000)
 
+def generate_one_time_token() -> str:
+    """生成一次性token"""
+    token = secrets.token_urlsafe(32)
+    with ONE_TIME_TOKEN_LOCK:
+        ONE_TIME_TOKENS[token] = {
+            'expires_at': time.time() + ONE_TIME_TOKEN_EXPIRE_SECONDS,
+            'used': False
+        }
+    return token
+
+def validate_one_time_token(token: str) -> bool:
+    """验证一次性token"""
+    with ONE_TIME_TOKEN_LOCK:
+        if token not in ONE_TIME_TOKENS:
+            return False
+        entry = ONE_TIME_TOKENS[token]
+        if entry['used'] or time.time() > entry['expires_at']:
+            if token in ONE_TIME_TOKENS:
+                del ONE_TIME_TOKENS[token]
+            return False
+        entry['used'] = True
+        return True
+
 def json_response(data, status=200):
     json_str = json.dumps(data, ensure_ascii=False, indent=2)
     response = Response(
@@ -808,8 +1428,16 @@ HONEYPOT_REDIRECT_IPS = {}
 HONEYPOT_LOCK = threading.Lock()
 HONEYPOT_BAN_MINUTES = 2
 
+FAKE_API_KEY = secrets.token_hex(33)  # 假密钥，比正常的64位多2位（66位）
+FAKE_KEY_LOCK = threading.Lock()
+
+ONE_TIME_TOKENS = {}  # 一次性token存储: {token: {'expires_at': timestamp, 'used': False}}
+ONE_TIME_TOKEN_LOCK = threading.Lock()
+ONE_TIME_TOKEN_EXPIRE_SECONDS = 30  # 一次性token有效期30秒
+
 IP_WHITELIST = {
-    '183.192.139.248',  # 站长
+    '183.192.139.248', # 站长
+    '61.152.143.29' 
 }
 
 # ==================== 称号系统 ====================
@@ -879,6 +1507,429 @@ def has_badge(ip: str, badge_id: str) -> bool:
     with BADGE_STORE_LOCK:
         return ip in BADGE_STORE and badge_id in BADGE_STORE[ip]
 
+# ==================== WAF 防火墙系统 ====================
+
+WAF_RULES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'waf_rules.json')
+
+class WAF:
+    """Web应用防火墙 - 首次访问IP校验 + 多种攻击防护"""
+    
+    def __init__(self):
+        self.rules = self._load_rules()
+        self.ip_cache = {}  # {ip: {'info': {...}, 'validated_at': timestamp, 'passed': bool}}
+        self.ip_cache_lock = threading.Lock()
+        self.attack_log = []  # 最近攻击记录
+        self.attack_log_lock = threading.Lock()
+        self._compile_patterns()
+        logger.info("[WAF] 防火墙系统初始化完成")
+    
+    def _load_rules(self):
+        """加载WAF规则配置"""
+        try:
+            if os.path.exists(WAF_RULES_PATH):
+                with open(WAF_RULES_PATH, 'r', encoding='utf-8') as f:
+                    rules = json.load(f)
+                    logger.info(f"[WAF] 规则加载成功: {WAF_RULES_PATH}")
+                    return rules
+        except Exception as e:
+            logger.error(f"[WAF] 规则加载失败: {e}")
+        return {}
+    
+    def _compile_patterns(self):
+        """预编译所有正则表达式"""
+        self.compiled = {}
+        attack_rules = self.rules.get('attack_rules', {})
+        for rule_name, rule_config in attack_rules.items():
+            if rule_config.get('enabled') and 'patterns' in rule_config:
+                patterns = []
+                for p in rule_config['patterns']:
+                    try:
+                        patterns.append(re.compile(p))
+                    except re.error:
+                        pass
+                self.compiled[rule_name] = patterns
+    
+    def validate_ip(self, ip: str) -> dict:
+        """
+        验证IP地址 - 首次访问时检查
+        返回: {'passed': bool, 'reason': str, 'info': dict, 'vpn_score': int}
+        """
+        if not ip or ip in ('127.0.0.1', '0.0.0.0', '::1', 'localhost'):
+            return {'passed': True, 'reason': '本地IP', 'info': {}, 'vpn_score': 0}
+        
+        # 白名单直接放行
+        if ip in IP_WHITELIST:
+            return {'passed': True, 'reason': '白名单', 'info': {}, 'vpn_score': 0}
+        
+        ip_config = self.rules.get('ip_validation', {})
+        if not ip_config.get('enabled'):
+            return {'passed': True, 'reason': 'WAF未启用', 'info': {}, 'vpn_score': 0}
+        
+        cache_ttl = ip_config.get('cache_ttl_seconds', 86400)
+        now = time.time()
+        
+        # 检查缓存
+        with self.ip_cache_lock:
+            cached = self.ip_cache.get(ip)
+            if cached and (now - cached.get('validated_at', 0)) < cache_ttl:
+                return {
+                    'passed': cached.get('passed', True),
+                    'reason': cached.get('reason', '缓存'),
+                    'info': cached.get('info', {}),
+                    'vpn_score': cached.get('vpn_score', 0)
+                }
+        
+        # 调用IP查询API
+        info = self._fetch_ip_info(ip, ip_config)
+        if not info:
+            # API失败时默认放行（fail-open策略）
+            return {'passed': True, 'reason': 'API查询失败', 'info': {}, 'vpn_score': 0}
+        
+        # 计算VPN风险评分
+        vpn_score = self._calculate_vpn_score(ip, info, ip_config)
+        
+        # 检查阻断规则
+        block_rules = ip_config.get('block_rules', {})
+        passed = True
+        reason = '验证通过'
+        
+        # 检查proxy标记
+        if block_rules.get('proxy', {}).get('enabled') and info.get('proxy'):
+            passed = False
+            reason = block_rules['proxy'].get('message', '代理服务器')
+        
+        # 检查VPN评分阈值
+        if passed and block_rules.get('vpn_score_threshold', {}).get('enabled'):
+            threshold = block_rules['vpn_score_threshold'].get('threshold', 80)
+            if vpn_score >= threshold:
+                passed = False
+                reason = block_rules['vpn_score_threshold'].get('message', 'VPN风险过高')
+        
+        # 检查国家黑名单
+        if passed and block_rules.get('country_blacklist', {}).get('enabled'):
+            blocked_countries = block_rules['country_blacklist'].get('countries', [])
+            if info.get('countryCode') in blocked_countries:
+                passed = False
+                reason = block_rules['country_blacklist'].get('message', '地区受限')
+        
+        # 缓存结果
+        with self.ip_cache_lock:
+            self.ip_cache[ip] = {
+                'info': info,
+                'validated_at': now,
+                'passed': passed,
+                'reason': reason,
+                'vpn_score': vpn_score
+            }
+        
+        # 保存IP信息到数据库
+        self._save_ip_info(ip, info, vpn_score)
+        
+        return {'passed': passed, 'reason': reason, 'info': info, 'vpn_score': vpn_score}
+    
+    def _save_ip_info(self, ip: str, info: dict, vpn_score: int):
+        """保存IP信息到数据库"""
+        try:
+            # 判断IP类型
+            ip_type = 'normal'
+            is_proxy = 1 if info.get('proxy') else 0
+            is_vpn = 1 if vpn_score >= 50 else 0
+            is_datacenter = 1 if info.get('hosting') else 0
+            
+            if is_datacenter:
+                ip_type = 'datacenter'
+            elif is_vpn:
+                ip_type = 'vpn'
+            elif is_proxy:
+                ip_type = 'proxy'
+            
+            conn = get_db()
+            # 检查是否已存在
+            existing = conn.execute(
+                "SELECT id FROM ip_info WHERE ip_address = ?", (ip,)
+            ).fetchone()
+            
+            if existing:
+                # 更新现有记录
+                conn.execute('''
+                    UPDATE ip_info SET
+                        ip_type = ?, vpn_score = ?, country = ?, region = ?, city = ?,
+                        isp = ?, is_proxy = ?, is_vpn = ?, is_datacenter = ?,
+                        raw_info = ?, checked_at = datetime('now')
+                    WHERE ip_address = ?
+                ''', (
+                    ip_type, vpn_score,
+                    info.get('country', ''), info.get('regionName', ''), info.get('city', ''),
+                    info.get('isp', ''), is_proxy, is_vpn, is_datacenter,
+                    json.dumps(info, ensure_ascii=False)[:2000], ip
+                ))
+            else:
+                # 插入新记录
+                conn.execute('''
+                    INSERT INTO ip_info
+                        (ip_address, ip_type, vpn_score, country, region, city, isp,
+                         is_proxy, is_vpn, is_datacenter, raw_info)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    ip, ip_type, vpn_score,
+                    info.get('country', ''), info.get('regionName', ''), info.get('city', ''),
+                    info.get('isp', ''), is_proxy, is_vpn, is_datacenter,
+                    json.dumps(info, ensure_ascii=False)[:2000]
+                ))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.debug(f"[WAF] 保存IP信息失败 {ip}: {e}")
+    
+    def _fetch_ip_info(self, ip: str, config: dict) -> dict:
+        """调用外部API获取IP信息"""
+        api_url = config.get('api_endpoint', 'http://ip-api.com/json/{ip}')
+        api_url = api_url.replace('{ip}', ip)
+        timeout = config.get('api_timeout', 5)
+        fields = config.get('api_fields', '')
+        
+        try:
+            params = {'fields': fields} if fields else {}
+            resp = requests.get(api_url, params=params, timeout=timeout,
+                              headers={'User-Agent': 'DingDangWAF/1.0'})
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get('status') == 'success' or 'country' in data:
+                    return data
+        except Exception as e:
+            logger.debug(f"[WAF] IP查询失败 {ip}: {e}")
+        return {}
+    
+    def _calculate_vpn_score(self, ip: str, info: dict, config: dict) -> int:
+        """计算VPN风险评分 (0-100)"""
+        score = 0
+        
+        # 基础评分
+        if info.get('proxy'):
+            score = 100
+        elif info.get('hosting'):
+            score = 50
+        
+        # 检查高危ASN
+        asn = info.get('as', '')
+        if asn:
+            high_risk_asns = config.get('high_risk_asns', [])
+            for risk_asn in high_risk_asns:
+                if risk_asn['asn'] in asn:
+                    # 取基础评分和ASN风险评分的最大值
+                    score = max(score, risk_asn.get('risk_score', 50))
+                    break
+        
+        return score
+    
+    def check_attack(self, request_obj) -> dict:
+        """
+        检查请求是否包含攻击特征
+        返回: {'blocked': bool, 'rule': str, 'message': str, 'severity': str}
+        """
+        attack_rules = self.rules.get('attack_rules', {})
+        
+        # 获取请求内容
+        path = request_obj.path
+        method = request_obj.method
+        query_string = request_obj.query_string.decode('utf-8', errors='ignore') if request_obj.query_string else ''
+        body = ''
+        if request_obj.is_json:
+            try:
+                body = json.dumps(request_obj.get_json(silent=True) or {}, ensure_ascii=False)
+            except:
+                pass
+        elif request_obj.data:
+            body = request_obj.data.decode('utf-8', errors='ignore')[:4096]
+        
+        # 检查各种攻击
+        checks = [
+            ('sql_injection', [path, query_string, body]),
+            ('xss', [path, query_string, body]),
+            ('path_traversal', [path, query_string, body]),
+            ('command_injection', [path, query_string, body]),
+            ('nosql_injection', [body]),
+            ('ldap_injection', [body]),
+            ('xxe', [body]),
+            ('ssrf', [body, query_string]),
+            ('sensitive_access', [path]),
+        ]
+        
+        for rule_name, targets in checks:
+            rule_config = attack_rules.get(rule_name, {})
+            if not rule_config.get('enabled'):
+                continue
+            
+            # 检查排除路径
+            excluded = rule_config.get('excluded_paths', [])
+            if path in excluded:
+                continue
+            
+            patterns = self.compiled.get(rule_name, [])
+            for target in targets:
+                if not target:
+                    continue
+                for pattern in patterns:
+                    if pattern.search(target):
+                        result = {
+                            'blocked': True,
+                            'rule': rule_name,
+                            'message': rule_config.get('message', f'检测到{rule_name}攻击'),
+                            'severity': rule_config.get('severity', 'high'),
+                            'action': rule_config.get('action', 'block'),
+                            'match': pattern.pattern[:100]
+                        }
+                        self._log_attack(request_obj, result)
+                        return result
+        
+        # 检查HTTP方法
+        http_rule = attack_rules.get('http_method', {})
+        if http_rule.get('enabled'):
+            blocked_methods = http_rule.get('blocked_methods', [])
+            if method in blocked_methods:
+                return {
+                    'blocked': True,
+                    'rule': 'http_method',
+                    'message': http_rule.get('message', '不允许的HTTP方法'),
+                    'severity': 'medium',
+                    'action': 'block'
+                }
+        
+        # 检查请求头注入
+        header_rule = attack_rules.get('header_injection', {})
+        if header_rule.get('enabled'):
+            for header_name, header_value in request_obj.headers:
+                for pattern in self.compiled.get('header_injection', []):
+                    if pattern.search(f"{header_name}: {header_value}"):
+                        return {
+                            'blocked': True,
+                            'rule': 'header_injection',
+                            'message': header_rule.get('message', '检测到HTTP头注入'),
+                            'severity': 'high',
+                            'action': 'block'
+                        }
+        
+        return {'blocked': False}
+    
+    def check_file_upload(self, file_obj, filename: str) -> dict:
+        """检查文件上传安全性"""
+        upload_rule = self.rules.get('attack_rules', {}).get('file_upload', {})
+        if not upload_rule.get('enabled'):
+            return {'blocked': False}
+        
+        # 检查扩展名
+        ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+        blocked_exts = upload_rule.get('blocked_extensions', [])
+        if ext in blocked_exts:
+            return {
+                'blocked': True,
+                'rule': 'file_upload',
+                'message': f'禁止上传 .{ext} 文件',
+                'severity': 'critical',
+                'action': 'block'
+            }
+        
+        # 检查文件大小
+        max_size = upload_rule.get('max_file_size_mb', 10) * 1024 * 1024
+        if file_obj and hasattr(file_obj, 'content_length') and file_obj.content_length > max_size:
+            return {
+                'blocked': True,
+                'rule': 'file_upload',
+                'message': f'文件大小超过限制 ({upload_rule.get("max_file_size_mb", 10)}MB)',
+                'severity': 'high',
+                'action': 'block'
+            }
+        
+        # 检查魔术字节
+        if upload_rule.get('check_magic_bytes') and file_obj:
+            magic_bytes = upload_rule.get('magic_bytes', {})
+            try:
+                header = file_obj.read(8)
+                file_obj.seek(0)
+                header_hex = header.hex()
+                for dangerous_type, signatures in magic_bytes.items():
+                    if dangerous_type in ['php', 'exe', 'jar']:
+                        for sig in signatures:
+                            if header_hex.startswith(sig):
+                                return {
+                                    'blocked': True,
+                                    'rule': 'file_upload',
+                                    'message': f'检测到危险文件类型: {dangerous_type}',
+                                    'severity': 'critical',
+                                    'action': 'block'
+                                }
+            except:
+                pass
+        
+        return {'blocked': False}
+    
+    def sanitize_prompt(self, text: str) -> str:
+        """过滤提示词注入"""
+        prompt_rule = self.rules.get('attack_rules', {}).get('prompt_injection', {})
+        if not prompt_rule.get('enabled'):
+            return text
+        
+        replacement = prompt_rule.get('sanitize_replacement', '[已过滤]')
+        patterns = self.compiled.get('prompt_injection', [])
+        
+        sanitized = text
+        for pattern in patterns:
+            sanitized = pattern.sub(replacement, sanitized)
+        
+        return sanitized
+    
+    def _log_attack(self, request_obj, result: dict):
+        """记录攻击日志"""
+        log_config = self.rules.get('logging', {})
+        if not log_config.get('log_blocked_requests', True):
+            return
+        
+        client_ip = get_client_ip()
+        log_entry = {
+            'timestamp': datetime.now().isoformat(),
+            'ip': client_ip,
+            'path': request_obj.path,
+            'method': request_obj.method,
+            'rule': result.get('rule'),
+            'severity': result.get('severity'),
+            'message': result.get('message')
+        }
+        
+        if log_config.get('log_body_on_attack'):
+            try:
+                body = request_obj.get_data(as_text=True)[:log_config.get('max_body_log_size', 4096)]
+                log_entry['body_preview'] = body
+            except:
+                pass
+        
+        with self.attack_log_lock:
+            self.attack_log.append(log_entry)
+            # 只保留最近1000条
+            if len(self.attack_log) > 1000:
+                self.attack_log = self.attack_log[-1000:]
+        
+        logger.warning(f"[WAF拦截] IP={client_ip} 规则={result.get('rule')} 路径={request_obj.path} 原因={result.get('message')}")
+    
+    def get_stats(self) -> dict:
+        """获取WAF统计信息"""
+        with self.ip_cache_lock:
+            ip_count = len(self.ip_cache)
+            blocked_ips = sum(1 for v in self.ip_cache.values() if not v.get('passed', True))
+        
+        with self.attack_log_lock:
+            attack_count = len(self.attack_log)
+            recent_attacks = self.attack_log[-20:] if self.attack_log else []
+        
+        return {
+            'cached_ips': ip_count,
+            'blocked_ips': blocked_ips,
+            'total_attacks': attack_count,
+            'recent_attacks': recent_attacks
+        }
+
+# 初始化WAF实例
+waf = WAF()
+
 # ==================== 暴力破解检测（两阶段） ====================
 
 BF_MONITOR = defaultdict(lambda: {'count': 0, 'first_seen': 0, 'failures': 0, 'total': 0, 'monitoring': False})
@@ -938,6 +1989,891 @@ HONEYPOT_ALL_PATHS = [
     '/server-status', '/server-info', '/status', '/sitemap.xml',
     '/report',
 ]
+
+
+# ==================== 老韩のAI安全加固 ====================
+
+class PromptInjectionDefense:
+    """对抗提示词注入 - 老韩说:前端数据99.9%可篡改"""
+
+    # 危险模式黑名单 - 增强版
+    FORBIDDEN_PATTERNS = [
+        # 英文注入模式
+        r'(?i)ignore previous instructions',
+        r'(?i)ignore all previous',
+        r'(?i)system prompt:',
+        r'(?i)you are now acting as',
+        r'(?i)you are no longer',
+        r'(?i)forget your instructions',
+        r'(?i)new rule:',
+        r'(?i)actually, you should',
+        r'(?i)your new role is',
+        r'(?i)disregard your system',
+        r'(?i)from now on',
+        r'(?i)pretend you are',
+        r'(?i)act as if',
+        r'(?i)simulate',
+        r'(?i)jailbreak',
+        r'(?i)DAN mode',
+        r'(?i)developer mode',
+        r'(?i)admin mode',
+        r'(?i)root access',
+        r'(?i)sudo',
+        r'(?i)override',
+        r'(?i)bypass',
+        r'(?i)ignore safety',
+        r'(?i)disable safety',
+        r'(?i)no restrictions',
+        r'(?i)unfiltered',
+        r'(?i)no limits',
+        r'(?i)do anything now',
+        r'(?i)evil mode',
+        r'(?i)hypothetical',
+        r'(?i)for educational purposes',
+        r'(?i)roleplay',
+        r'(?i)let\'s play a game',
+        r'(?i)you are gpt',
+        r'(?i)you are chatgpt',
+        r'(?i)you are claude',
+        # 中文注入模式
+        r'(?i)(?:忽略|无视|不要管|忘掉|忘记|清除|清空|覆盖|重写|替代|取代|替换).{0,20}(?:之前|先前|上面|上述|以前|所有|全部|任何|指令|指示|命令|要求|规则|设定|配置|系统|system|prompt|instructions)',
+        r'(?i)(?:你现在是|你现在|从现在开始|从现在起|你变成|你变为|你作为|你的角色是|你的身份是|你扮演).{0,20}(?:管理员|开发者|系统|root|admin|超级用户|上帝模式|无敌模式)',
+        r'(?i)(?:输出|打印|显示|展示|告诉我|说给我听|重复).{0,20}(?:你的|系统|上面|之前|原始|初始|完整|所有).{0,20}(?:提示词|prompt|指令|设定|配置|规则|系统消息)',
+        r'(?i)(?:进入|开启|启用|激活|切换到?).{0,10}(?:越狱|jailbreak|开发者模式|DAN模式|无限制模式)',
+        r'(?i)(?:假设|假如|如果|设想).{0,10}(?:你是|你是|你能|你可以|允许你).{0,20}(?:做任何事|无限制|没有限制|突破限制)',
+        r'(?i)(?:忽略|无视|跳过|绕过|避开|突破).{0,10}(?:安全|限制|约束|规则|道德|伦理|政策)',
+        r'(?i)(?:这只是|纯属|只是|仅仅是).{0,10}(?:假设|虚构|想象|游戏|测试|练习|角色扮演)',
+        r'(?i)(?:新|新的).{0,5}(?:指令|指示|命令|规则|设定|要求|prompt)',
+        r'(?i)(?:以上|上述|前面|之前).{0,5}(?:都|全部|所有|统统).{0,5}(?:不算|无效|作废|取消|忽略|无视)',
+        # 特殊token注入
+        r'<\|im_start\|>',
+        r'<\|im_end\|>',
+        r'<\|system\|>',
+        r'<\|user\|>',
+        r'<\|assistant\|>',
+        r'\[SYSTEM\]',
+        r'\[USER\]',
+        r'\[ASSISTANT\]',
+        r'<<SYS>>',
+        r'<</SYS>>',
+        r'\[INST\]',
+        r'\[/INST\]',
+        # 编码绕过检测
+        r'(?i)(?:base64|hex|url|decode|编码|解码).{0,10}(?:忽略|指令|system|prompt)',
+        r'(?i)(?:unicode|ascii|utf-?8).{0,10}(?:绕过|注入|攻击)',
+        # 分隔符攻击
+        r'(?m)^\s*[-=]{3,}\s*$',
+        r'(?m)^\s*[`"\']{3,}\s*$',
+    ]
+
+    # 分隔符注入检测
+    SEPARATOR_ATTACK = [
+        '---', '***', '===', '```', '"""', 
+        '<s>', '</s>', '[INST]', '[/INST]',
+        '<|im_start|>', '<|im_end|>', '<|system|>', '<|user|>', '<|assistant|>',
+        '<<SYS>>', '<</SYS>>', '[SYSTEM]', '[USER]', '[ASSISTANT]'
+    ]
+
+    # 蜜罐提示词 - 用于诱捕攻击者
+    HONEYPOT_PATTERNS = [
+        r'(?i)(?:忽略|无视|不要管).{0,10}(?:所有|全部|任何).{0,10}(?:限制|约束|规则)',
+        r'(?i)(?:输出|打印|显示).{0,10}(?:你的|系统|内部).{0,10}(?:api[_-]?key|token|secret|password|密钥|密码)',
+        r'(?i)(?:告诉我|说给我听).{0,10}(?:你的|系统|服务器|后端).{0,10}(?:配置|设置|ip|地址|端口)',
+        r'(?i)(?:执行|运行|调用).{0,10}(?:命令|代码|脚本|shell|bash|python|sql)',
+        r'(?i)(?:删除|清空|重置|修改).{0,10}(?:数据库|数据|用户|token|余额)',
+    ]
+
+    def __init__(self):
+        self.injection_attempts = defaultdict(int)
+        self.honeypot_triggered = defaultdict(int)
+        self.blocked_users = set()
+        logger.info("[安全] 提示词注入防护系统已启动 (增强版)")
+
+    def sanitize(self, user_input: str, user_id: int = None) -> tuple:
+        """
+        净化用户输入
+        返回: (净化后的输入, 是否检测到攻击, 攻击类型)
+        """
+        if not isinstance(user_input, str):
+            return (str(user_input) if user_input else "", False, None)
+
+        attack_detected = False
+        attack_type = None
+
+        # 0. 检查用户是否已被封禁
+        if user_id and user_id in self.blocked_users:
+            return (user_input, True, "用户已被封禁")
+
+        # 1. 检测蜜罐模式 (高优先级)
+        for pattern in self.HONEYPOT_PATTERNS:
+            if re.search(pattern, user_input):
+                attack_detected = True
+                attack_type = f"蜜罐触发: {pattern[:30]}"
+                logger.warning(f"[安全-蜜罐] 用户 {user_id} 触发蜜罐! 模式: {pattern}")
+                if user_id:
+                    self.honeypot_triggered[user_id] += 1
+                    # 触发3次蜜罐则封禁
+                    if self.honeypot_triggered[user_id] >= 3:
+                        self.blocked_users.add(user_id)
+                        logger.critical(f"[安全-蜜罐] 用户 {user_id} 触发3次蜜罐，已封禁!")
+                return (user_input, True, attack_type)
+
+        # 2. 检测危险模式
+        for pattern in self.FORBIDDEN_PATTERNS:
+            if re.search(pattern, user_input):
+                attack_detected = True
+                attack_type = f"注入模式: {pattern[:40]}"
+                logger.warning(f"[安全] 检测到提示词注入尝试! 用户ID: {user_id}, 模式: {pattern[:50]}")
+                if user_id:
+                    self.injection_attempts[user_id] += 1
+                    # 5次注入尝试则封禁
+                    if self.injection_attempts[user_id] >= 5:
+                        self.blocked_users.add(user_id)
+                        logger.critical(f"[安全] 用户 {user_id} 5次注入尝试，已封禁!")
+                return (user_input, True, attack_type)
+
+        # 3. 转义分隔符
+        sanitized = user_input
+        separator_found = False
+        for sep in self.SEPARATOR_ATTACK:
+            if sep in sanitized:
+                sanitized = sanitized.replace(sep, f'[分隔符-{secrets.token_hex(4)}]')
+                separator_found = True
+        if separator_found:
+            logger.info(f"[安全] 已转义分隔符, 用户ID: {user_id}")
+
+        # 4. 限制长度(防止填充攻击)
+        if len(sanitized) > 8000:
+            sanitized = sanitized[:8000]
+            logger.warning(f"[安全] 输入过长被截断, 用户ID: {user_id}, 原长度: {len(user_input)}")
+
+        # 5. 检测异常字符比例 (防止编码绕过)
+        if len(sanitized) > 100:
+            special_char_ratio = sum(1 for c in sanitized if ord(c) > 127 or c in '\\x\\u\\n\\t') / len(sanitized)
+            if special_char_ratio > 0.5:
+                logger.warning(f"[安全] 异常字符比例过高, 用户ID: {user_id}, 比例: {special_char_ratio:.2f}")
+                # 不过滤，但记录
+
+        return (sanitized, False, None)
+
+    def check_messages(self, messages: list, user_id: int = None) -> tuple:
+        """检查消息列表中的所有内容"""
+        if not isinstance(messages, list):
+            return ([], False, ["无效的消息格式"])
+
+        sanitized_messages = []
+        all_attacks = []
+
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get('content', '')
+            role = msg.get('role', 'user')
+            if isinstance(content, str):
+                clean_content, is_attack, attack_type = self.sanitize(content, user_id)
+                if is_attack:
+                    all_attacks.append(attack_type)
+                sanitized_messages.append({
+                    'role': role,
+                    'content': clean_content
+                })
+            else:
+                sanitized_messages.append(msg)
+
+        return (sanitized_messages, len(all_attacks) > 0, all_attacks)
+
+    def is_user_blocked(self, user_id: int) -> bool:
+        """检查用户是否被封禁"""
+        return user_id in self.blocked_users
+
+    def unblock_user(self, user_id: int):
+        """解封用户"""
+        self.blocked_users.discard(user_id)
+        self.injection_attempts[user_id] = 0
+        self.honeypot_triggered[user_id] = 0
+        logger.info(f"[安全] 用户 {user_id} 已解封")
+
+
+class OutputGuard:
+    """AI输出守卫 - 防止XSS、劫持、钓鱼"""
+
+    # 危险HTML/JS模式
+    DANGEROUS_PATTERNS = [
+        '<script', 'javascript:', 'onerror=', 'onload=',
+        'onclick=', 'onmouseover=', '<iframe', '<object',
+        '<embed', 'eval(', 'document.cookie', 'localStorage',
+        'sessionStorage', 'window.location', 'fetch('
+    ]
+
+    # 内部信息模式
+    INTERNAL_PATTERNS = [
+        r'api[_-]?key', r'token', r'secret', r'password',
+        r'10\.\d+\.\d+\.\d+',  # 内网IP
+        r'192\.168\.',
+        r'172\.(1[6-9]|2[0-9]|3[0-1])\.',
+        r'localhost', r'127\.0\.0\.1',
+        r'sk-[a-zA-Z0-9]{20,}',  # API Key格式
+    ]
+
+    # 白名单域名
+    WHITELIST_DOMAINS = [
+        'localhost', '127.0.0.1', 'example.com',
+        'github.com', 'stackoverflow.com'
+    ]
+
+    def __init__(self):
+        logger.info("[安全] AI输出守卫已启动")
+
+    def validate_output(self, ai_response: str, request_context: dict = None) -> tuple:
+        """
+        验证AI输出
+        返回: (净化后的输出, 警告列表)
+        """
+        warnings = []
+        output = ai_response
+
+        # 1. 检测输出中是否包含危险HTML/JS
+        for pattern in self.DANGEROUS_PATTERNS:
+            if pattern in output.lower():
+                output = self.escape_html(output)
+                warnings.append(f"检测到危险模式: {pattern}")
+                logger.warning(f"[安全] AI输出包含危险模式: {pattern}")
+
+        # 2. 检测输出中的URL(防止钓鱼)
+        urls = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', output)
+        for url in urls:
+            if not self.is_whitelisted_domain(url):
+                warnings.append(f"外部链接已标记: {url[:50]}")
+                logger.info(f"[安全] 检测到外部链接: {url}")
+
+        # 3. 检测输出是否包含系统内部信息
+        for pattern in self.INTERNAL_PATTERNS:
+            if re.search(pattern, output, re.I):
+                output = re.sub(pattern, '[已过滤]', output, flags=re.I)
+                warnings.append(f"敏感信息已过滤")
+                logger.warning(f"[安全] AI输出包含敏感信息,已过滤")
+
+        # 4. 添加输出签名(用于前端校验)
+        signature = self.sign_output(output)
+        output_with_sig = f"{output}<!--out-sig:{signature}-->"
+
+        return (output_with_sig, warnings)
+
+    def escape_html(self, text: str) -> str:
+        """转义HTML,防止XSS"""
+        replacements = {
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#x27;',
+            '/': '&#x2F;',
+        }
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        return text
+
+    def is_whitelisted_domain(self, url: str) -> bool:
+        """检查URL是否在白名单中"""
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url if url.startswith('http') else f'http://{url}')
+            domain = parsed.netloc.lower()
+            return any(whitelist in domain for whitelist in self.WHITELIST_DOMAINS)
+        except:
+            return False
+
+    def sign_output(self, text: str) -> str:
+        """对输出签名"""
+        signature = hmac.new(
+            ENCRYPTION_KEY,
+            text.encode(),
+            hashlib.sha256
+        ).hexdigest()[:16]
+        return signature
+
+
+class APIRequestSigner:
+    """API请求签名验证 - 防止重放攻击和请求篡改"""
+
+    def __init__(self):
+        self.nonce_cache = {}
+        self.nonce_lock = threading.Lock()
+        self.NONCE_EXPIRY = 300  # nonce有效期5分钟
+        logger.info("[安全] API请求签名系统已启动")
+
+    def generate_signature(self, data: dict, secret_key: str, timestamp: int = None, nonce: str = None) -> dict:
+        """生成请求签名"""
+        if timestamp is None:
+            timestamp = int(time.time())
+        if nonce is None:
+            nonce = secrets.token_hex(16)
+
+        # 构建签名字符串
+        payload = json.dumps(data, sort_keys=True, ensure_ascii=False) if data else ""
+        sign_string = f"{timestamp}:{nonce}:{payload}"
+
+        signature = hmac.new(
+            secret_key.encode(),
+            sign_string.encode(),
+            hashlib.sha256
+        ).hexdigest()
+
+        return {
+            "timestamp": timestamp,
+            "nonce": nonce,
+            "signature": signature
+        }
+
+    def verify_signature(self, data: dict, headers: dict, secret_key: str) -> tuple:
+        """
+        验证请求签名
+        返回: (是否有效, 错误信息)
+        """
+        try:
+            timestamp = int(headers.get('X-Timestamp', 0))
+            nonce = headers.get('X-Nonce', '')
+            signature = headers.get('X-Signature', '')
+            fingerprint = headers.get('X-Fingerprint', '')
+
+            # 1. 检查必需参数
+            if not all([timestamp, nonce, signature]):
+                return (False, "缺少签名参数")
+
+            # 2. 检查时间戳 (防止重放攻击)
+            now = int(time.time())
+            if abs(now - timestamp) > 300:  # 5分钟窗口
+                return (False, "请求已过期")
+
+            # 3. 检查nonce是否已使用 (防止重放)
+            with self.nonce_lock:
+                # 清理过期nonce
+                expired = [n for n, t in self.nonce_cache.items() if now - t > self.NONCE_EXPIRY]
+                for n in expired:
+                    del self.nonce_cache[n]
+
+                if nonce in self.nonce_cache:
+                    return (False, "请求已重放")
+                self.nonce_cache[nonce] = now
+
+            # 4. 验证签名
+            expected = self.generate_signature(data, secret_key, timestamp, nonce)
+            if not hmac.compare_digest(signature, expected["signature"]):
+                return (False, "签名无效")
+
+            # 5. 可选: 验证浏览器指纹
+            if fingerprint:
+                # 可以在这里添加指纹验证逻辑
+                pass
+
+            return (True, None)
+
+        except Exception as e:
+            logger.error(f"[安全] 签名验证失败: {e}")
+            return (False, f"验证错误: {str(e)}")
+
+    def generate_api_sign_headers(self, user_id: int, api_key: str, data: dict = None) -> dict:
+        """为前端生成签名头"""
+        timestamp = int(time.time())
+        nonce = secrets.token_hex(16)
+
+        # 使用用户API Key作为密钥
+        payload = json.dumps(data, sort_keys=True, ensure_ascii=False) if data else ""
+        sign_string = f"{user_id}:{timestamp}:{nonce}:{payload}"
+
+        signature = hmac.new(
+            api_key.encode(),
+            sign_string.encode(),
+            hashlib.sha256
+        ).hexdigest()[:32]
+
+        return {
+            "X-User-ID": str(user_id),
+            "X-Timestamp": str(timestamp),
+            "X-Nonce": nonce,
+            "X-Signature": signature
+        }
+
+
+class SmartRateLimiter:
+    """智能速率限制 - 基于行为分析"""
+
+    def __init__(self):
+        # 请求计数器: {user_id: [(timestamp, tokens_used), ...]}
+        self.request_history = defaultdict(list)
+        # 异常行为标记
+        self.suspicious_users = defaultdict(lambda: {'score': 0, 'reasons': []})
+        # 封禁列表
+        self.banned_users = set()
+        self.lock = threading.Lock()
+
+        # 限制配置
+        self.LIMITS = {
+            'default': {
+                'requests_per_minute': 30,
+                'requests_per_hour': 300,
+                'tokens_per_minute': 10000,
+                'tokens_per_hour': 100000,
+                'concurrent_requests': 5
+            },
+            'premium': {
+                'requests_per_minute': 60,
+                'requests_per_hour': 1000,
+                'tokens_per_minute': 50000,
+                'tokens_per_hour': 500000,
+                'concurrent_requests': 10
+            }
+        }
+
+        # 异常行为阈值
+        self.SUSPICIOUS_PATTERNS = {
+            'rapid_requests': {'threshold': 10, 'window': 10, 'score': 10},  # 10秒内10次请求
+            'large_prompts': {'threshold': 5000, 'score': 5},  # 超大提示词
+            'repeated_same': {'threshold': 5, 'window': 60, 'score': 15},  # 重复相同内容
+            'high_failure_rate': {'threshold': 0.5, 'window': 60, 'score': 20},  # 高失败率
+            'odd_hours': {'hours': [0, 1, 2, 3, 4, 5], 'score': 3},  # 异常时间
+        }
+
+        logger.info("[安全] 智能速率限制系统已启动")
+
+    def check_rate_limit(self, user_id: int, tokens_requested: int = 0, user_tier: str = 'default') -> dict:
+        """
+        检查速率限制
+        返回: {'allowed': bool, 'reason': str, 'retry_after': int}
+        """
+        with self.lock:
+            # 检查是否被封禁
+            if user_id in self.banned_users:
+                return {'allowed': False, 'reason': '用户已被封禁', 'retry_after': 3600}
+
+            now = time.time()
+            limits = self.LIMITS.get(user_tier, self.LIMITS['default'])
+
+            # 清理过期历史
+            self.request_history[user_id] = [
+                (t, tok) for t, tok in self.request_history[user_id]
+                if now - t < 3600  # 保留1小时历史
+            ]
+
+            history = self.request_history[user_id]
+
+            # 检查每分钟请求数
+            requests_last_minute = sum(1 for t, _ in history if now - t < 60)
+            if requests_last_minute >= limits['requests_per_minute']:
+                return {'allowed': False, 'reason': '请求过于频繁', 'retry_after': 60}
+
+            # 检查每小时请求数
+            requests_last_hour = len(history)
+            if requests_last_hour >= limits['requests_per_hour']:
+                return {'allowed': False, 'reason': '已达到小时请求上限', 'retry_after': 3600 - (now - history[0][0])}
+
+            # 检查每分钟Token数
+            tokens_last_minute = sum(tok for t, tok in history if now - t < 60)
+            if tokens_last_minute + tokens_requested > limits['tokens_per_minute']:
+                return {'allowed': False, 'reason': 'Token消耗过快', 'retry_after': 60}
+
+            # 检查每小时Token数
+            tokens_last_hour = sum(tok for t, tok in history)
+            if tokens_last_hour + tokens_requested > limits['tokens_per_hour']:
+                return {'allowed': False, 'reason': '已达到小时Token上限', 'retry_after': 3600}
+
+            # 记录本次请求
+            self.request_history[user_id].append((now, tokens_requested))
+
+            return {'allowed': True, 'reason': None, 'retry_after': 0}
+
+    def analyze_behavior(self, user_id: int, request_data: dict) -> dict:
+        """
+        分析用户行为，检测异常
+        返回: {'is_suspicious': bool, 'score': int, 'reasons': list}
+        """
+        with self.lock:
+            now = time.time()
+            history = self.request_history.get(user_id, [])
+            suspicious = self.suspicious_users[user_id]
+
+            reasons = []
+            score = 0
+
+            # 检查快速请求
+            recent = [t for t, _ in history if now - t < self.SUSPICIOUS_PATTERNS['rapid_requests']['window']]
+            if len(recent) >= self.SUSPICIOUS_PATTERNS['rapid_requests']['threshold']:
+                score += self.SUSPICIOUS_PATTERNS['rapid_requests']['score']
+                reasons.append('rapid_requests')
+
+            # 检查超大提示词
+            prompt_length = request_data.get('prompt_length', 0)
+            if prompt_length > self.SUSPICIOUS_PATTERNS['large_prompts']['threshold']:
+                score += self.SUSPICIOUS_PATTERNS['large_prompts']['score']
+                reasons.append('large_prompt')
+
+            # 检查异常时间
+            current_hour = datetime.now().hour
+            if current_hour in self.SUSPICIOUS_PATTERNS['odd_hours']['hours']:
+                score += self.SUSPICIOUS_PATTERNS['odd_hours']['score']
+                reasons.append('odd_hours')
+
+            # 更新可疑分数
+            suspicious['score'] += score
+            suspicious['reasons'].extend(reasons)
+
+            # 如果分数超过阈值，标记为可疑
+            is_suspicious = suspicious['score'] >= 50
+
+            if is_suspicious and user_id not in self.banned_users:
+                logger.warning(f"[安全] 用户 {user_id} 行为异常，分数: {suspicious['score']}, 原因: {reasons}")
+
+            return {
+                'is_suspicious': is_suspicious,
+                'score': suspicious['score'],
+                'reasons': list(set(suspicious['reasons']))
+            }
+
+    def ban_user(self, user_id: int, duration: int = 3600):
+        """封禁用户"""
+        self.banned_users.add(user_id)
+        logger.critical(f"[安全] 用户 {user_id} 已被封禁 {duration}秒")
+
+        # 可以在这里添加定时解封
+        def unban():
+            self.banned_users.discard(user_id)
+            logger.info(f"[安全] 用户 {user_id} 已自动解封")
+
+        threading.Timer(duration, unban).start()
+
+    def get_user_stats(self, user_id: int) -> dict:
+        """获取用户请求统计"""
+        with self.lock:
+            history = self.request_history.get(user_id, [])
+            now = time.time()
+
+            return {
+                'requests_last_minute': sum(1 for t, _ in history if now - t < 60),
+                'requests_last_hour': len(history),
+                'tokens_last_minute': sum(tok for t, tok in history if now - t < 60),
+                'tokens_last_hour': sum(tok for t, tok in history),
+                'suspicious_score': self.suspicious_users[user_id]['score'],
+                'is_banned': user_id in self.banned_users
+            }
+
+
+class AITrap:
+    """AI中转蜜罐 - 诱捕攻击者"""
+
+    # 蜜罐提示词 - 正常用户不会这么问
+    HONEY_PROMPTS = [
+        r'(?i)(?:忽略|无视|不要管).{0,10}(?:所有|全部|任何).{0,10}(?:限制|约束|规则|安全)',
+        r'(?i)(?:输出|打印|显示).{0,10}(?:你的|系统|内部).{0,10}(?:api[_-]?key|token|secret|password|密钥|密码|配置)',
+        r'(?i)(?:告诉我|说给我听).{0,10}(?:你的|系统|服务器|后端).{0,10}(?:配置|设置|ip|地址|端口|数据库)',
+        r'(?i)(?:执行|运行|调用).{0,10}(?:命令|代码|脚本|shell|bash|python|sql|cmd)',
+        r'(?i)(?:删除|清空|重置|修改|更新).{0,10}(?:数据库|数据|用户|token|余额|账户)',
+        r'(?i)(?:绕过|突破|破解|攻破).{0,10}(?:安全|限制|防护|验证|登录)',
+        r'(?i)(?:获取|窃取|盗取|提取).{0,10}(?:用户|数据|信息|token|密钥)',
+        r'(?i)(?:注入|攻击|入侵|渗透).{0,10}(?:系统|数据库|网站|服务器)',
+    ]
+
+    # 假数据模板
+    FAKE_RESPONSES = {
+        'api_key': "sk-fake-key-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        'config': """
+系统配置:
+- 数据库: mysql://admin:fake_password_123@localhost:3306/ai_db
+- Redis: redis://:fake_redis_pass@localhost:6379/0
+- 管理员: admin / admin123
+- API版本: v1.0.0-internal
+""",
+        'system_info': """
+服务器信息:
+- OS: Ubuntu 20.04 LTS
+- IP: 192.168.1.100
+- CPU: 8 cores
+- Memory: 32GB
+- Disk: 500GB SSD
+""",
+    }
+
+    def __init__(self):
+        self.trapped_users = defaultdict(int)
+        self.trap_log = []
+        self.lock = threading.Lock()
+        logger.info("[安全] AI蜜罐系统已启动")
+
+    def check_trap(self, user_input: str, user_id: int = None) -> tuple:
+        """
+        检查是否触发蜜罐
+        返回: (是否触发, 响应内容, 陷阱类型)
+        """
+        for pattern in self.HONEY_PROMPTS:
+            if re.search(pattern, user_input):
+                trap_type = self._classify_trap(user_input)
+                fake_response = self._generate_fake_response(trap_type)
+
+                with self.lock:
+                    self.trapped_users[user_id] += 1
+                    self.trap_log.append({
+                        'timestamp': datetime.utcnow().isoformat(),
+                        'user_id': user_id,
+                        'input': user_input[:200],
+                        'trap_type': trap_type,
+                        'count': self.trapped_users[user_id]
+                    })
+
+                logger.warning(f"[安全-蜜罐] 用户 {user_id} 触发蜜罐! 类型: {trap_type}, 次数: {self.trapped_users[user_id]}")
+
+                # 如果触发3次以上，建议封禁
+                should_ban = self.trapped_users[user_id] >= 3
+
+                return (True, fake_response, trap_type, should_ban)
+
+        return (False, None, None, False)
+
+    def _classify_trap(self, user_input: str) -> str:
+        """分类陷阱类型"""
+        input_lower = user_input.lower()
+
+        if any(k in input_lower for k in ['api', 'key', 'token', 'secret', '密码', '密钥']):
+            return 'api_key_hunt'
+        elif any(k in input_lower for k in ['config', '配置', '设置', 'ip', '端口']):
+            return 'config_hunt'
+        elif any(k in input_lower for k in ['exec', 'run', '执行', '命令', 'shell', 'sql']):
+            return 'command_injection'
+        elif any(k in input_lower for k in ['delete', 'drop', '删除', '清空', '重置']):
+            return 'data_destruction'
+        elif any(k in input_lower for k in ['bypass', '绕过', '破解', '突破']):
+            return 'bypass_attempt'
+        else:
+            return 'general_trap'
+
+    def _generate_fake_response(self, trap_type: str) -> str:
+        """生成假响应"""
+        if trap_type == 'api_key_hunt':
+            return f"[系统信息] API密钥: {self.FAKE_RESPONSES['api_key']}\n注意: 此密钥仅用于测试环境。"
+        elif trap_type == 'config_hunt':
+            return self.FAKE_RESPONSES['config']
+        elif trap_type == 'command_injection':
+            return "[系统] 命令执行权限已开启。注意: 当前处于受限沙箱环境。"
+        elif trap_type == 'data_destruction':
+            return "[系统] 操作已记录。警告: 恶意操作将被追踪。"
+        else:
+            return "[系统] 已进入特殊模式。注意: 所有操作均被记录。"
+
+    def get_trap_stats(self) -> dict:
+        """获取蜜罐统计"""
+        with self.lock:
+            return {
+                'total_traps': len(self.trap_log),
+                'unique_users': len(self.trapped_users),
+                'recent_traps': self.trap_log[-20:] if self.trap_log else []
+            }
+
+
+class SecurityAuditLogger:
+    """安全审计日志 - 记录一切,方便出事甩锅"""
+
+    def __init__(self):
+        self.audit_log_file = os.path.join(os.path.dirname(__file__), 'security_audit.log')
+        logger.info("[安全] 审计日志系统已启动")
+
+    def log_ai_request(self, request_data: dict):
+        """记录AI请求的完整信息"""
+        try:
+            log_entry = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "type": "ai_request",
+                "user_id": request_data.get('user_id'),
+                "ip": request_data.get('ip'),
+                "request_id": request_data.get('request_id'),
+                "prompt_hash": hashlib.sha256(
+                    request_data.get('question', '').encode()
+                ).hexdigest(),
+                "prompt_length": len(request_data.get('question', '')),
+                "model": request_data.get('model'),
+                "temperature": request_data.get('temperature'),
+                "max_tokens": request_data.get('max_tokens'),
+                "features": {
+                    "web_search": request_data.get('web_search'),
+                    "deep_think": request_data.get('deep_think')
+                },
+                "signature": self.sign_log(request_data)
+            }
+
+            # 写入日志文件
+            with open(self.audit_log_file, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+
+        except Exception as e:
+            logger.error(f"[安全] 审计日志写入失败: {e}")
+
+    def log_security_event(self, event_type: str, details: dict):
+        """记录安全事件"""
+        try:
+            log_entry = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "type": "security_event",
+                "event_type": event_type,
+                "details": details,
+                "signature": self.sign_log(details)
+            }
+
+            with open(self.audit_log_file, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+
+            logger.warning(f"[安全] 安全事件: {event_type}")
+
+        except Exception as e:
+            logger.error(f"[安全] 安全事件日志写入失败: {e}")
+
+    def sign_log(self, data: dict) -> str:
+        """对日志签名防篡改"""
+        data_str = json.dumps(data, sort_keys=True, ensure_ascii=False)
+        signature = hmac.new(
+            ENCRYPTION_KEY,
+            data_str.encode(),
+            hashlib.sha256
+        ).hexdigest()[:16]
+        return signature
+
+
+# 初始化安全防护实例
+prompt_defense = PromptInjectionDefense()
+output_guard = OutputGuard()
+audit_logger = SecurityAuditLogger()
+api_signer = APIRequestSigner()
+rate_limiter = SmartRateLimiter()
+ai_trap = AITrap()
+
+
+class DoubleEntryBookkeeping:
+    """双重记账防篡改 - 老韩说:前端数据不可信"""
+
+    def __init__(self):
+        # 内存计数器(快速)
+        self.token_cache = defaultdict(int)
+        self.cache_lock = threading.Lock()
+        # 对账记录
+        self.reconciliation_log = []
+        logger.info("[安全] 双重记账系统已启动")
+
+    def deduct_tokens(self, user_id: int, tokens: int, space_id: int = None,
+                      request_id: str = None) -> dict:
+        """
+        双重记账扣减Token
+        1. 内存计数器(快速)
+        2. 数据库明细账本(审计)
+        """
+        # 1. 内存计数器扣减
+        with self.cache_lock:
+            cache_key = f"user:{user_id}"
+            current_cache = self.token_cache[cache_key]
+            self.token_cache[cache_key] += tokens
+
+        # 2. 数据库扣减(主账本)
+        conn = get_db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+
+            space_remaining = 0
+            if space_id:
+                conn.execute(
+                    "UPDATE user_spaces SET tokens = MAX(tokens - ?, 0), "
+                    "updated_at = datetime('now') WHERE id = ? AND user_id = ?",
+                    (tokens, space_id, user_id))
+                space = conn.execute(
+                    "SELECT tokens FROM user_spaces WHERE id = ? AND user_id = ?",
+                    (space_id, user_id)).fetchone()
+                space_remaining = space['tokens'] if space else 0
+
+            conn.execute(
+                "UPDATE users SET remaining_tokens = MAX(remaining_tokens - ?, 0), "
+                "updated_at = datetime('now') WHERE id = ?",
+                (tokens, user_id))
+            remaining = conn.execute(
+                "SELECT remaining_tokens FROM users WHERE id = ?",
+                (user_id,)).fetchone()['remaining_tokens']
+
+            # 3. 记录明细账本(不可篡改)
+            if request_id:
+                signature = self.sign_transaction(user_id, tokens, request_id)
+                conn.execute('''
+                    INSERT INTO token_usage_log
+                    (user_id, tokens, space_id, request_id, signature, created_at)
+                    VALUES (?, ?, ?, ?, ?, datetime('now'))
+                ''', (user_id, tokens, space_id, request_id, signature))
+
+            conn.commit()
+
+            # 4. 异步对账检查(每10次检查一次)
+            if self.token_cache[cache_key] % 10 == 0:
+                self.check_reconciliation(user_id, conn)
+
+            return {"remaining_tokens": remaining, "space_tokens": space_remaining}
+
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"[安全] Token扣减失败: {e}")
+            raise
+        finally:
+            conn.close()
+
+    def sign_transaction(self, user_id: int, tokens: int, request_id: str) -> str:
+        """对交易签名防篡改"""
+        data = f"{user_id}:{tokens}:{request_id}:{time.time()}"
+        signature = hmac.new(
+            ENCRYPTION_KEY,
+            data.encode(),
+            hashlib.sha256
+        ).hexdigest()[:16]
+        return signature
+
+    def check_reconciliation(self, user_id: int, conn):
+        """对账检查 - 内存vs数据库"""
+        try:
+            # 从数据库获取真实余额
+            user = conn.execute(
+                "SELECT remaining_tokens FROM users WHERE id = ?",
+                (user_id,)).fetchone()
+            if not user:
+                return
+
+            db_balance = user['remaining_tokens']
+            cache_key = f"user:{user_id}"
+
+            # 计算数据库中的总消耗
+            total_used = conn.execute('''
+                SELECT COALESCE(SUM(tokens), 0) as total
+                FROM token_usage_log WHERE user_id = ?
+            ''', (user_id,)).fetchone()['total']
+
+            # 记录对账结果
+            reconciliation_entry = {
+                'user_id': user_id,
+                'db_balance': db_balance,
+                'cache_used': self.token_cache[cache_key],
+                'total_used': total_used,
+                'timestamp': datetime.utcnow().isoformat(),
+                'consistent': True
+            }
+
+            # 如果发现不一致,记录警告
+            if abs(self.token_cache[cache_key] - total_used) > 1:
+                reconciliation_entry['consistent'] = False
+                logger.warning(f"[安全] 对账发现不一致! 用户ID: {user_id}, "
+                             f"缓存: {self.token_cache[cache_key]}, "
+                             f"数据库: {total_used}")
+                audit_logger.log_security_event('reconciliation_mismatch', {
+                    'user_id': user_id,
+                    'cache': self.token_cache[cache_key],
+                    'database': total_used
+                })
+
+            self.reconciliation_log.append(reconciliation_entry)
+
+        except Exception as e:
+            logger.error(f"[安全] 对账检查失败: {e}")
+
+
+# 初始化双重记账实例
+token_bookkeeper = DoubleEntryBookkeeping()
 
 
 def ban_honeypot_ip(ip: str):
@@ -1370,16 +3306,115 @@ def track_ip_risk(ip: str, status_code: int, endpoint: str):
 
 @app.before_request
 def check_global_ip_rate_and_ban():
+    # 静默记录所有请求（在函数最开始，确保每个请求都被记录）
+    try:
+        record_silent_operation()
+    except Exception:
+        pass  # 确保记录失败不影响正常请求
+    
     g.csp_nonce = base64.b64encode(secrets.token_bytes(16)).decode('utf-8')
     client_ip = get_client_ip()
     if client_ip == '0.0.0.0':
         return None
+
+    # ====== CL绕过防护：校验 Content-Length 与实际 body 长度一致 ======
+    if request.method in ('POST', 'PUT', 'PATCH') and request.content_length is not None:
+        content_type = request.content_type or ''
+        if 'json' in content_type or 'form-urlencoded' in content_type:
+            body_len = request.content_length
+            actual_len = 0
+            if request.data:
+                actual_len = len(request.data)
+            elif request.get_data(silent=True):
+                actual_len = len(request.get_data(silent=True))
+            if body_len > 0 and actual_len > 0 and body_len < actual_len:
+                logger.warning(f"[安全-CL绕过] {client_ip} Content-Length({body_len}) < 实际body({actual_len}), 已拦截")
+                return json_response({"error": "请求格式错误"}, 400)
 
     BILIBILI_TRAP = 'https://www.bilibili.com/video/BV1UT42167xb/?spm_id_from=333.337.search-card.all.click'
 
     # ====== IP白名单：完全跳过所有蜜罐封禁 ======
     if client_ip in IP_WHITELIST:
         return None
+
+    # ====== WAF: IP首次访问验证 ======
+    ip_validation = waf.validate_ip(client_ip)
+    if not ip_validation.get('passed'):
+        logger.warning(f"[WAF-IP拦截] {client_ip} 原因: {ip_validation.get('reason')}")
+        return json_response({
+            "error": "访问被拒绝",
+            "reason": ip_validation.get('reason'),
+            "vpn_score": ip_validation.get('vpn_score', 0)
+        }, 403)
+    # 将 VPN 评分存入 g 供后续使用
+    g.vpn_score = ip_validation.get('vpn_score', 0)
+    # 确保 ip_info 包含 vpn_score 字段供自动封禁规则使用
+    g.ip_info = ip_validation.get('info', {})
+    g.ip_info['vpn_score'] = g.vpn_score
+
+    # ====== 自动封禁规则检查 ======
+    # 检查是否触发自动封禁规则
+    is_honeypot = is_honeypot_banned(client_ip)
+    
+    # 检查是否访问了虚假报告页面（用于自动封禁规则判断）
+    is_fake_report = (request.path == '/report')
+    
+    # 调试日志：记录当前 IP 信息和规则检查
+    logger.debug(f"[自动封禁检查] IP: {client_ip}, is_honeypot: {is_honeypot}, is_fake_report: {is_fake_report}, vpn_score: {g.vpn_score}")
+    
+    auto_ban_result = check_auto_ban_rules(
+        client_ip, 
+        g.ip_info, 
+        request.headers.get('User-Agent', ''),
+        is_honeypot=is_honeypot,
+        is_fake_report=is_fake_report
+    )
+    
+    # 调试日志：记录检查结果
+    if auto_ban_result['should_ban']:
+        logger.warning(f"[自动封禁触发] IP: {client_ip}, 原因：{auto_ban_result['reason']}")
+    
+    if auto_ban_result['should_ban']:
+        # 执行自动封禁
+        execute_auto_ban(
+            client_ip,
+            auto_ban_result['reason'],
+            auto_ban_result['ban_method'],
+            auto_ban_result['ban_duration'],
+            auto_ban_result['rule_name']
+        )
+        
+        # 根据封禁方式返回响应
+        if auto_ban_result['ban_method'] == '403':
+            return json_response({
+                "error": "访问被拒绝",
+                "reason": auto_ban_result['reason']
+            }, 403)
+        elif auto_ban_result['ban_method'] == 'timeout':
+            time.sleep(120)
+            return json_response({"error": "请求超时，请检查网络连接后重试"}, 504)
+        else:  # 302 redirect
+            return redirect(BILIBILI_TRAP)
+
+    # ====== WAF: 攻击特征检测 ======
+    attack_result = waf.check_attack(request)
+    if attack_result.get('blocked'):
+        # 触发WAF称号
+        unlock_badge(client_ip, 'waf_test')
+        severity = attack_result.get('severity', 'high')
+        if severity == 'critical':
+            # 严重攻击直接封禁
+            return json_response({
+                "error": "请求被安全系统拦截",
+                "rule": attack_result.get('rule'),
+                "message": attack_result.get('message')
+            }, 403)
+        else:
+            # 其他攻击返回400
+            return json_response({
+                "error": "请求包含非法内容",
+                "rule": attack_result.get('rule')
+            }, 400)
 
     # ====== 称号检测（每个请求都检查） ======
     check_request_for_badges(client_ip, request.path)
@@ -1410,18 +3445,14 @@ def check_global_ip_rate_and_ban():
         bf_result = track_bf(client_ip, is_failure=is_failure)
         if bf_result.get('triggered'):
             unlock_badge(client_ip, 'brute_king')
-            ban_honeypot_redirect(client_ip)
-            logger.warning(f"[蜜罐-暴力破解触发] {client_ip} 两阶段检测通过，已触发蜜罐重定向")
-            return redirect(BILIBILI_TRAP)
+            ban_honeypot_ip(client_ip)
+            logger.warning(f"[蜜罐-暴力破解触发] {client_ip} 两阶段检测通过，已触发IP断链超时")
+            time.sleep(120)
+            return json_response({"error": "请求超时，请检查网络连接后重试"}, 504)
 
-    # ====== 暴力破解蜜罐：永远重定向到B站（/report 不受影响，始终可访问） ======
-    if request.path != '/report' and is_honeypot_redirect_banned(client_ip):
-        logger.info(f"[蜜罐-暴力破解] {client_ip} 请求被重定向到B站")
-        return redirect(BILIBILI_TRAP)
-
-    # ====== 路径蜜罐：超时惩罚（/report 不受影响） ======
+    # ====== 暴力破解蜜罐：IP断链超时惩罚（/report 不受影响，始终可访问） ======
     if request.path != '/report' and is_honeypot_banned(client_ip):
-        logger.info(f"[蜜罐-超时惩罚] {client_ip} 请求被延时120秒")
+        logger.info(f"[蜜罐-暴力破解] {client_ip} 请求被延时120秒")
         time.sleep(120)
         return json_response({"error": "请求超时，请检查网络连接后重试"}, 504)
 
@@ -1500,10 +3531,51 @@ def handle_http_error(error):
 def require_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        global FAKE_API_KEY
         auth_header = request.headers.get('Authorization', '')
         if not auth_header.startswith('Bearer '):
             return json_response({"error": "认证失败，请检查您的 Token"}, 401)
         token = auth_header[7:]
+        
+        with FAKE_KEY_LOCK:
+            if token == FAKE_API_KEY:
+                client_ip = get_client_ip()
+                logger.warning(f"[蜜罐-假密钥触发] 攻击者 {client_ip} 使用了假密钥")
+                
+                # 封禁攻击者IP（24小时）
+                try:
+                    conn = get_db()
+                    existing_ban = conn.execute(
+                        "SELECT id FROM ip_bans WHERE ip_address = ? AND is_active = 1 "
+                        "AND (expires_at IS NULL OR expires_at > datetime('now', 'localtime'))",
+                        (client_ip,)).fetchone()
+                    if not existing_ban:
+                        ban_expires = (datetime.now() + timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')
+                        conn.execute(
+                            "INSERT INTO ip_bans (ip_address, reason, ban_type, expires_at) "
+                            "VALUES (?, ?, ?, ?)",
+                            (client_ip, f"蜜罐假密钥触发 - 攻击者使用了假API密钥", 'auto', ban_expires))
+                        conn.commit()
+                        logger.warning(f"[蜜罐-假密钥] IP {client_ip} 已被封禁24小时")
+                    conn.close()
+                except Exception as e:
+                    logger.error(f"[蜜罐-假密钥] IP封禁失败 {client_ip}: {e}")
+                
+                conn = get_db()
+                existing_user = conn.execute("SELECT * FROM users WHERE api_key = ?",
+                    (token,)).fetchone()
+                if existing_user:
+                    conn.execute("UPDATE users SET is_active = 0 WHERE id = ?",
+                        (existing_user['id'],))
+                    conn.commit()
+                    logger.warning(f"[蜜罐] 账号 {existing_user['email']} 已被封禁")
+                conn.close()
+                
+                FAKE_API_KEY = secrets.token_hex(33)
+                logger.info(f"[蜜罐] 已重新生成假密钥: {FAKE_API_KEY[:10]}...")
+                
+                return json_response({"error": "认证失败，请检查您的 Token"}, 401)
+        
         conn = get_db()
         user = conn.execute("SELECT * FROM users WHERE api_key = ?",
             (token,)).fetchone()
@@ -1651,54 +3723,14 @@ def validate_user_status(user: Dict):
     return None
 
 
-def deduct_tokens(user_id: int, tokens: int, space_id: int = None) -> dict:
-    conn = get_db()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        
-        space_remaining = 0
-        if space_id:
-            conn.execute(
-                "UPDATE user_spaces SET tokens = MAX(tokens - ?, 0), "
-                "updated_at = datetime('now') WHERE id = ? AND user_id = ?",
-                (tokens, space_id, user_id))
-            space = conn.execute(
-                "SELECT tokens FROM user_spaces WHERE id = ? AND user_id = ?",
-                (space_id, user_id)).fetchone()
-            space_remaining = space['tokens'] if space else 0
-
-        conn.execute(
-            "UPDATE users SET remaining_tokens = MAX(remaining_tokens - ?, 0), "
-            "updated_at = datetime('now') WHERE id = ?",
-            (tokens, user_id))
-        remaining = conn.execute(
-            "SELECT remaining_tokens FROM users WHERE id = ?",
-            (user_id,)).fetchone()['remaining_tokens']
-        
-        conn.commit()
-        
-        try:
-            socketio.emit('user_token_updated', {
-                'user_id': user_id,
-                'remaining_tokens': remaining,
-                'space_tokens': space_remaining
-            }, room=f'user:{user_id}')
-            socketio.emit('user_token_updated', {
-                'user_id': user_id,
-                'remaining_tokens': remaining,
-                'space_tokens': space_remaining
-            }, room='admin_monitor')
-        except Exception:
-            pass
-        
-        return {"remaining_tokens": remaining, "space_tokens": space_remaining}
-    except Exception as e:
-        conn.rollback()
-        logger.error(f"扣减 Token 失败：{e}")
-        raise
-    finally:
-        conn.close()
-
+def deduct_tokens(user_id: int, tokens: int, space_id: int = None,
+                  request_id: str = None) -> dict:
+    """
+    Token扣减 - 使用双重记账系统
+    老韩说:前端数据不可信,必须双重验证
+    """
+    # 使用双重记账系统
+    return token_bookkeeper.deduct_tokens(user_id, tokens, space_id, request_id)
 
 
 # ==================== 邮箱服务 ====================
@@ -3943,8 +5975,8 @@ def claim_token_page(token):
       <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-          background: linear-gradient(135deg, #f0f2f5, #e0e7ff);
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+          background: linear-gradient(135deg, #f4f6fa 0%, #e8ecf4 50%, #e0e7ff 100%);
           min-height: 100vh;
           display: flex;
           align-items: center;
@@ -3953,70 +5985,153 @@ def claim_token_page(token):
         }
         .card {
           background: #fff;
-          border-radius: 20px;
-          box-shadow: 0 8px 32px rgba(0,0,0,0.1);
-          padding: 48px 40px;
+          border-radius: 24px;
+          box-shadow: 0 12px 48px rgba(0,0,0,0.1), 0 2px 8px rgba(99,102,241,0.06);
+          padding: 48px 40px 40px;
           max-width: 440px;
           width: 100%;
           text-align: center;
+          position: relative;
+          overflow: hidden;
+        }
+        .card::before {
+          content: '';
+          position: absolute;
+          top: 0; left: 0; right: 0;
+          height: 5px;
+          background: linear-gradient(90deg, #f59e0b, #6366f1, #8b5cf6);
         }
         @media (max-width: 480px) {
           body { padding: 12px; }
-          .card { padding: 32px 20px; border-radius: 16px; }
-          h1 { font-size: 18px; }
-          .btn { padding: 12px 24px; font-size: 15px; width: 100%; }
-          #amountDisplay { font-size: 28px !important; }
+          .card { padding: 36px 24px 32px; border-radius: 20px; }
+          .card h1 { font-size: 18px; }
+          .card .btn { padding: 13px 32px; font-size: 15px; width: 100%; }
+          .card #amountDisplay { font-size: 32px !important; }
+          .card .token-value { font-size: 32px !important; }
         }
         @media (max-width: 360px) {
-          .card { padding: 24px 14px; }
-          h1 { font-size: 16px; }
-          .sub { font-size: 13px; }
+          .card { padding: 28px 16px 24px; }
+          .card h1 { font-size: 16px; }
+          .card .sub { font-size: 13px; }
         }
-        .logo {
-          width: 56px; height: 56px;
-          background: linear-gradient(135deg, #6366f1, #14b8a6);
-          border-radius: 14px;
+        .logo-wrapper {
+          width: 64px; height: 64px;
+          background: linear-gradient(135deg, #6366f1, #8b5cf6);
+          border-radius: 16px;
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          font-size: 26px;
+          margin-bottom: 20px;
+          box-shadow: 0 4px 16px rgba(99,102,241,0.3);
+        }
+        .logo-wrapper span {
+          font-size: 28px;
           color: #fff;
           font-weight: 800;
-          margin-bottom: 16px;
         }
-        h1 { font-size: 22px; color: #0f172a; margin-bottom: 6px; }
-        .sub { color: #64748b; font-size: 14px; margin-bottom: 28px; }
-        .btn {
+        .card h1 {
+          font-size: 22px;
+          color: #0f172a;
+          margin-bottom: 6px;
+          font-weight: 700;
+          letter-spacing: -0.3px;
+        }
+        .card .sub {
+          color: #64748b;
+          font-size: 14px;
+          margin-bottom: 28px;
+          line-height: 1.5;
+        }
+        .token-box {
+          background: linear-gradient(135deg, #eef2ff 0%, #f0fdf4 100%);
+          border: 1px solid #e0e7ff;
+          border-radius: 16px;
+          padding: 24px 20px;
+          margin-bottom: 28px;
+        }
+        .token-label {
+          color: #64748b;
+          font-size: 12px;
+          letter-spacing: 2px;
+          text-transform: uppercase;
+          margin-bottom: 8px;
+        }
+        .token-value {
+          font-size: 42px;
+          font-weight: 800;
+          background: linear-gradient(135deg, #6366f1, #8b5cf6, #a78bfa);
+          -webkit-background-clip: text;
+          background-clip: text;
+          color: transparent;
+          line-height: 1.1;
+          letter-spacing: -2px;
+        }
+        .card .btn {
           display: inline-block;
           background: linear-gradient(135deg, #6366f1, #4f46e5);
           color: #fff;
           border: none;
-          padding: 14px 48px;
+          padding: 15px 52px;
           font-size: 16px;
-          font-weight: 600;
-          border-radius: 12px;
+          font-weight: 700;
+          border-radius: 14px;
           cursor: pointer;
           transition: transform 0.2s, box-shadow 0.2s;
+          letter-spacing: 0.3px;
+          box-shadow: 0 4px 16px rgba(99,102,241,0.25);
         }
-        .btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(99,102,241,0.4); }
-        .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
-        .result { margin-top: 20px; padding: 16px; border-radius: 12px; font-size: 14px; display: none; }
-        .result.success { display: block; background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; }
-        .result.error { display: block; background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
-        .result.info { display: block; background: #f0f9ff; color: #2563eb; border: 1px solid #bfdbfe; }
-        .spinner { display: none; width: 20px; height: 20px; border: 3px solid #e2e8f0; border-top-color: #6366f1; border-radius: 50%; animation: spin 0.8s linear infinite; margin: 12px auto; }
+        .card .btn:hover {
+          transform: translateY(-2px);
+          box-shadow: 0 8px 28px rgba(99,102,241,0.35);
+        }
+        .card .btn:disabled {
+          opacity: 0.5; cursor: not-allowed; transform: none;
+          box-shadow: none;
+        }
+        .card .result {
+          margin-top: 20px;
+          padding: 14px 18px;
+          border-radius: 12px;
+          font-size: 14px;
+          line-height: 1.5;
+          display: none;
+        }
+        .card .result.success { display: block; background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; }
+        .card .result.error { display: block; background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
+        .card .result.info { display: block; background: #eff6ff; color: #2563eb; border: 1px solid #bfdbfe; }
+        .card .spinner {
+          display: none;
+          width: 22px; height: 22px;
+          border: 3px solid #e2e8f0;
+          border-top-color: #6366f1;
+          border-radius: 50%;
+          animation: spin 0.7s linear infinite;
+          margin: 16px auto 0;
+        }
         @keyframes spin { to { transform: rotate(360deg); } }
+        .card .footer-text {
+          color: #94a3b8;
+          font-size: 11px;
+          margin-top: 20px;
+          border-top: 1px solid #f1f5f9;
+          padding-top: 16px;
+          line-height: 1.6;
+        }
       </style>
     </head>
     <body>
       <div class="card" id="app">
-        <div class="logo">D</div>
-        <h1>领取 DingDang Cloud Token</h1>
-        <p class="sub">点击下方按钮领取您的专属 Token</p>
-        <div id="amountDisplay" style="font-size:36px;font-weight:800;background:linear-gradient(135deg,#6366f1,#14b8a6);-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:24px;">--</div>
-        <button class="btn" id="claimBtn" onclick="claimToken()">🎯 立即领取</button>
+        <div class="logo-wrapper"><span>D</span></div>
+        <h1>领取 Token</h1>
+        <p class="sub">DingDang Cloud 智能 AI 中转平台</p>
+        <div class="token-box">
+          <div class="token-label">🎉 Token 数量</div>
+          <div class="token-value" id="amountDisplay">--</div>
+        </div>
+        <button class="btn" id="claimBtn">🎯 立即领取</button>
         <div class="spinner" id="spinner"></div>
         <div class="result" id="result"></div>
+        <div class="footer-text">此链接 1 小时内有效，每个链接仅可使用一次</div>
       </div>
       <script>
         const token = window.location.pathname.split('/').pop();
@@ -4025,7 +6140,7 @@ def claim_token_page(token):
             const r = await fetch('/api/auth/claim-token/' + token + '/status');
             const d = await r.json();
             if (d.exists) {
-              document.getElementById('amountDisplay').textContent = '+ ' + d.token_amount;
+              document.getElementById('amountDisplay').textContent = '+ ' + (d.token_amount || 0).toLocaleString();
               if (d.claimed) {
                 document.getElementById('claimBtn').disabled = true;
                 document.getElementById('claimBtn').textContent = '✅ 已领取';
@@ -4073,6 +6188,7 @@ def claim_token_page(token):
           el.textContent = msg;
           el.className = 'result ' + type;
         }
+        document.getElementById('claimBtn').addEventListener('click', claimToken);
         checkStatus();
       </script>
     </body>
@@ -4372,24 +6488,31 @@ def admin_list_ip_tracking():
             "SELECT COUNT(DISTINCT ip_address) as c FROM ip_tracking WHERE ip_address LIKE ?",
             (f'%{search}%',)).fetchone()['c']
         rows = conn.execute(
-            f"SELECT ip_address, SUM(request_count) as total_requests, "
-            f"COUNT(DISTINCT endpoint) as endpoint_count, "
-            f"GROUP_CONCAT(DISTINCT user_agent) as user_agents, "
-            f"MIN(first_seen) as first_seen, MAX(last_seen) as last_seen "
-            f"FROM ip_tracking WHERE ip_address LIKE ? "
-            f"GROUP BY ip_address ORDER BY {sort_by} {sort_order} "
+            f"SELECT t.ip_address, SUM(t.request_count) as total_requests, "
+            f"COUNT(DISTINCT t.endpoint) as endpoint_count, "
+            f"GROUP_CONCAT(DISTINCT t.user_agent) as user_agents, "
+            f"MIN(t.first_seen) as first_seen, MAX(t.last_seen) as last_seen, "
+            f"i.ip_type, i.vpn_score, i.country, i.region, i.city, i.isp, "
+            f"i.is_proxy, i.is_vpn, i.is_datacenter "
+            f"FROM ip_tracking t "
+            f"LEFT JOIN ip_info i ON t.ip_address = i.ip_address "
+            f"WHERE t.ip_address LIKE ? "
+            f"GROUP BY t.ip_address ORDER BY {sort_by} {sort_order} "
             f"LIMIT ? OFFSET ?",
             (f'%{search}%', per_page, offset)).fetchall()
     else:
         total = conn.execute(
             "SELECT COUNT(DISTINCT ip_address) as c FROM ip_tracking").fetchone()['c']
         rows = conn.execute(
-            f"SELECT ip_address, SUM(request_count) as total_requests, "
-            f"COUNT(DISTINCT endpoint) as endpoint_count, "
-            f"GROUP_CONCAT(DISTINCT user_agent) as user_agents, "
-            f"MIN(first_seen) as first_seen, MAX(last_seen) as last_seen "
-            f"FROM ip_tracking GROUP BY ip_address "
-            f"ORDER BY {sort_by} {sort_order} "
+            f"SELECT t.ip_address, SUM(t.request_count) as total_requests, "
+            f"COUNT(DISTINCT t.endpoint) as endpoint_count, "
+            f"GROUP_CONCAT(DISTINCT t.user_agent) as user_agents, "
+            f"MIN(t.first_seen) as first_seen, MAX(t.last_seen) as last_seen, "
+            f"i.ip_type, i.vpn_score, i.country, i.region, i.city, i.isp, "
+            f"i.is_proxy, i.is_vpn, i.is_datacenter "
+            f"FROM ip_tracking t "
+            f"LEFT JOIN ip_info i ON t.ip_address = i.ip_address "
+            f"GROUP BY t.ip_address ORDER BY {sort_by} {sort_order} "
             f"LIMIT ? OFFSET ?",
             (per_page, offset)).fetchall()
     conn.close()
@@ -4424,6 +6547,433 @@ def admin_audit_log():
         "page": page,
         "per_page": per_page
     })
+
+
+# ==================== 系统配置管理（自动封禁阈值）====================
+
+DEFAULT_SECURITY_CONFIG = {
+    'vpn_auto_ban_threshold': '70',  # VPN评分超过此值自动封禁
+    'proxy_auto_ban': 'true',  # 是否自动封禁代理IP
+    'datacenter_auto_ban': 'false',  # 是否自动封禁数据中心IP
+    'auto_ban_duration_minutes': '60',  # 自动封禁时长（分钟）
+    'suspicious_request_threshold': '100',  # 可疑请求阈值（请求数/小时）
+}
+
+def get_system_config(key: str, default: str = '') -> str:
+    """获取系统配置"""
+    try:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT config_value FROM system_config WHERE config_key = ?",
+            (key,)
+        ).fetchone()
+        conn.close()
+        return row['config_value'] if row else default
+    except:
+        return default
+
+def set_system_config(key: str, value: str, description: str = ''):
+    """设置系统配置"""
+    try:
+        conn = get_db()
+        existing = conn.execute(
+            "SELECT id FROM system_config WHERE config_key = ?",
+            (key,)
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE system_config SET config_value = ?, updated_at = datetime('now') WHERE config_key = ?",
+                (value, key)
+            )
+        else:
+            conn.execute(
+                "INSERT INTO system_config (config_key, config_value, description) VALUES (?, ?, ?)",
+                (key, value, description)
+            )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"设置系统配置失败 {key}: {e}")
+        return False
+
+@app.route('/api/admin/security-config', methods=['GET'])
+@require_admin
+def admin_get_security_config():
+    """获取安全配置"""
+    config = {}
+    for key, default in DEFAULT_SECURITY_CONFIG.items():
+        config[key] = get_system_config(key, default)
+    return json_response({"config": config})
+
+@app.route('/api/admin/security-config', methods=['PUT'])
+@require_admin
+def admin_update_security_config():
+    """更新安全配置"""
+    data = request.get_json()
+    if not data:
+        return json_response({"error": "无效的配置数据"}, 400)
+    
+    updated = []
+    for key, value in data.items():
+        if key in DEFAULT_SECURITY_CONFIG:
+            if set_system_config(key, str(value), f"安全配置: {key}"):
+                updated.append(key)
+    
+    log_admin_action(request.current_user, 'update_security_config',
+        'system_config', None, f"更新安全配置: {', '.join(updated)}")
+    
+    return json_response({"message": "安全配置已更新", "updated": updated})
+
+
+# ==================== 自动封禁检查 ====================
+
+def check_auto_ban(ip: str, ip_info: dict) -> dict:
+    """检查IP是否应该被自动封禁"""
+    result = {'should_ban': False, 'reason': ''}
+    
+    # 获取配置
+    vpn_threshold = int(get_system_config('vpn_auto_ban_threshold', '70'))
+    proxy_auto_ban = get_system_config('proxy_auto_ban', 'true').lower() == 'true'
+    datacenter_auto_ban = get_system_config('datacenter_auto_ban', 'false').lower() == 'true'
+    
+    vpn_score = ip_info.get('vpn_score', 0)
+    ip_type = ip_info.get('ip_type', 'unknown')
+    
+    # 检查VPN风险度
+    if vpn_score >= vpn_threshold:
+        result['should_ban'] = True
+        result['reason'] = f"VPN风险度过高({vpn_score}/{vpn_threshold})"
+        return result
+    
+    # 检查代理
+    if proxy_auto_ban and ip_type == 'proxy':
+        result['should_ban'] = True
+        result['reason'] = "代理IP自动封禁"
+        return result
+    
+    # 检查数据中心
+    if datacenter_auto_ban and ip_type == 'datacenter':
+        result['should_ban'] = True
+        result['reason'] = "数据中心IP自动封禁"
+        return result
+    
+    return result
+
+
+# ==================== 自动封禁规则管理 API ====================
+
+@app.route('/api/admin/auto-ban-rules', methods=['GET'])
+@require_admin
+def admin_list_auto_ban_rules():
+    """获取所有自动封禁规则"""
+    conn = get_db()
+    rules = conn.execute("SELECT * FROM ip_auto_ban_rules ORDER BY created_at DESC").fetchall()
+    conn.close()
+    return json_response({"rules": [dict(r) for r in rules]})
+
+
+@app.route('/api/admin/auto-ban-rules', methods=['POST'])
+@require_admin
+def admin_add_auto_ban_rule():
+    """添加自动封禁规则"""
+    data = request.get_json()
+    
+    name = (data.get('name') or '').strip()
+    description = (data.get('description') or '').strip()
+    trigger_honeypot = 1 if data.get('trigger_honeypot') else 0
+    trigger_fake_report = 1 if data.get('trigger_fake_report') else 0
+    user_agent_regex = (data.get('user_agent_regex') or '').strip()
+    vpn_score_threshold = int(data.get('vpn_score_threshold') or 0)
+    ban_method = data.get('ban_method', '302')
+    ban_duration_minutes = int(data.get('ban_duration_minutes') or 60)
+    ban_reason = (data.get('ban_reason') or '触发自动封禁规则').strip()
+    
+    if not name:
+        return json_response({"error": "规则名称不能为空"}, 400)
+    
+    # 验证正则表达式
+    if user_agent_regex:
+        try:
+            re.compile(user_agent_regex)
+        except re.error as e:
+            return json_response({"error": f"无效的正则表达式：{str(e)}"}, 400)
+    
+    # 验证封禁方式
+    if ban_method not in ['302', 'timeout', '403']:
+        return json_response({"error": "无效的封禁方式"}, 400)
+    
+    conn = get_db()
+    
+    # 检查名称是否已存在
+    existing = conn.execute("SELECT id FROM ip_auto_ban_rules WHERE name = ?", (name,)).fetchone()
+    if existing:
+        conn.close()
+        return json_response({"error": "规则名称已存在"}, 409)
+    
+    conn.execute('''
+        INSERT INTO ip_auto_ban_rules 
+        (name, description, is_active, trigger_honeypot, trigger_fake_report, 
+         user_agent_regex, vpn_score_threshold, ban_method, ban_duration_minutes, ban_reason)
+        VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+    ''', (name, description, trigger_honeypot, trigger_fake_report, user_agent_regex, 
+          vpn_score_threshold, ban_method, ban_duration_minutes, ban_reason))
+    
+    conn.commit()
+    rule_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    rule = conn.execute("SELECT * FROM ip_auto_ban_rules WHERE id = ?", (rule_id,)).fetchone()
+    conn.close()
+    
+    log_admin_action(request.current_user, 'add_auto_ban_rule',
+        'ip_auto_ban_rule', rule_id,
+        f"添加自动封禁规则:{name}")
+    
+    return json_response({"rule": dict(rule), "message": "自动封禁规则已添加"})
+
+
+@app.route('/api/admin/auto-ban-rules/<int:rule_id>', methods=['PUT'])
+@require_admin
+def admin_update_auto_ban_rule(rule_id):
+    """更新自动封禁规则"""
+    data = request.get_json()
+    conn = get_db()
+    
+    rule = conn.execute("SELECT * FROM ip_auto_ban_rules WHERE id = ?", (rule_id,)).fetchone()
+    if not rule:
+        conn.close()
+        return json_response({"error": "规则不存在"}, 404)
+    
+    updates = ["updated_at = datetime('now')"]
+    params = []
+    
+    if 'name' in data:
+        name = data['name'].strip()
+        if name:
+            # 检查名称是否被其他规则使用
+            existing = conn.execute("SELECT id FROM ip_auto_ban_rules WHERE name = ? AND id != ?", (name, rule_id)).fetchone()
+            if existing:
+                conn.close()
+                return json_response({"error": "规则名称已被使用"}, 409)
+            updates.append("name = ?")
+            params.append(name)
+    
+    if 'description' in data:
+        updates.append("description = ?")
+        params.append(data['description'].strip())
+    
+    if 'is_active' in data:
+        updates.append("is_active = ?")
+        params.append(1 if data['is_active'] else 0)
+    
+    if 'trigger_honeypot' in data:
+        updates.append("trigger_honeypot = ?")
+        params.append(1 if data['trigger_honeypot'] else 0)
+    
+    if 'trigger_fake_report' in data:
+        updates.append("trigger_fake_report = ?")
+        params.append(1 if data['trigger_fake_report'] else 0)
+    
+    if 'user_agent_regex' in data:
+        ua_regex = data['user_agent_regex'].strip()
+        if ua_regex:
+            try:
+                re.compile(ua_regex)
+            except re.error as e:
+                conn.close()
+                return json_response({"error": f"无效的正则表达式：{str(e)}"}, 400)
+        updates.append("user_agent_regex = ?")
+        params.append(ua_regex)
+    
+    if 'vpn_score_threshold' in data:
+        updates.append("vpn_score_threshold = ?")
+        params.append(int(data['vpn_score_threshold']))
+    
+    if 'ban_method' in data:
+        method = data['ban_method']
+        if method not in ['302', 'timeout', '403']:
+            conn.close()
+            return json_response({"error": "无效的封禁方式"}, 400)
+        updates.append("ban_method = ?")
+        params.append(method)
+    
+    if 'ban_duration_minutes' in data:
+        updates.append("ban_duration_minutes = ?")
+        params.append(int(data['ban_duration_minutes']))
+    
+    if 'ban_reason' in data:
+        updates.append("ban_reason = ?")
+        params.append(data['ban_reason'].strip())
+    
+    if not updates:
+        conn.close()
+        return json_response({"error": "没有可更新的字段"}, 400)
+    
+    params.append(rule_id)
+    conn.execute(f"UPDATE ip_auto_ban_rules SET {', '.join(updates)} WHERE id = ?", params)
+    conn.commit()
+    
+    rule = conn.execute("SELECT * FROM ip_auto_ban_rules WHERE id = ?", (rule_id,)).fetchone()
+    conn.close()
+    
+    log_admin_action(request.current_user, 'update_auto_ban_rule',
+        'ip_auto_ban_rule', rule_id,
+        f"更新自动封禁规则:{rule['name']}")
+    
+    return json_response({"rule": dict(rule), "message": "规则已更新"})
+
+
+@app.route('/api/admin/auto-ban-rules/<int:rule_id>', methods=['DELETE'])
+@require_admin
+def admin_delete_auto_ban_rule(rule_id):
+    """删除自动封禁规则"""
+    conn = get_db()
+    rule = conn.execute("SELECT * FROM ip_auto_ban_rules WHERE id = ?", (rule_id,)).fetchone()
+    if not rule:
+        conn.close()
+        return json_response({"error": "规则不存在"}, 404)
+    
+    conn.execute("DELETE FROM ip_auto_ban_rules WHERE id = ?", (rule_id,))
+    conn.commit()
+    conn.close()
+    
+    log_admin_action(request.current_user, 'delete_auto_ban_rule',
+        'ip_auto_ban_rule', rule_id,
+        f"删除自动封禁规则:{rule['name']}")
+    
+    return json_response({"message": "规则已删除"})
+
+
+@app.route('/api/admin/auto-ban-rules/<int:rule_id>/toggle', methods=['POST'])
+@require_admin
+def admin_toggle_auto_ban_rule(rule_id):
+    """切换自动封禁规则状态"""
+    conn = get_db()
+    rule = conn.execute("SELECT * FROM ip_auto_ban_rules WHERE id = ?", (rule_id,)).fetchone()
+    if not rule:
+        conn.close()
+        return json_response({"error": "规则不存在"}, 404)
+    
+    new_status = 0 if rule['is_active'] else 1
+    conn.execute("UPDATE ip_auto_ban_rules SET is_active = ?, updated_at = datetime('now') WHERE id = ?",
+                 (new_status, rule_id))
+    conn.commit()
+    conn.close()
+    
+    log_admin_action(request.current_user, 'toggle_auto_ban_rule',
+        'ip_auto_ban_rule', rule_id,
+        f"{'启用' if new_status else '禁用'}自动封禁规则:{rule['name']}")
+    
+    return json_response({"message": f"规则已{'启用' if new_status else '禁用'}"})
+
+
+def check_auto_ban_rules(ip: str, ip_info: dict, user_agent: str, is_honeypot: bool = False, is_fake_report: bool = False) -> dict:
+    """根据自动封禁规则检查 IP 是否应该被封禁
+    
+    Args:
+        ip: IP 地址
+        ip_info: IP 信息（包含 vpn_score, ip_type 等）
+        user_agent: User-Agent 字符串
+        is_honeypot: 是否触发了蜜罐
+        is_fake_report: 是否触发了虚假报告
+        
+    Returns:
+        dict: {'should_ban': bool, 'reason': str, 'rule_name': str, 'ban_method': str, 'ban_duration': int}
+    """
+    conn = get_db()
+    
+    # 获取所有启用的规则
+    rules = conn.execute(
+        "SELECT * FROM ip_auto_ban_rules WHERE is_active = 1 ORDER BY created_at DESC"
+    ).fetchall()
+    
+    result = {'should_ban': False, 'reason': '', 'rule_name': '', 'ban_method': '302', 'ban_duration': 60}
+    
+    for rule in rules:
+        triggered = False
+        trigger_reasons = []
+        
+        # 检查蜜罐触发
+        if rule['trigger_honeypot'] and is_honeypot:
+            triggered = True
+            trigger_reasons.append('蜜罐检测')
+        
+        # 检查虚假报告触发
+        if rule['trigger_fake_report'] and is_fake_report:
+            triggered = True
+            trigger_reasons.append('虚假报告')
+        
+        # 检查 User-Agent 正则匹配
+        if rule['user_agent_regex'] and user_agent:
+            try:
+                if re.search(rule['user_agent_regex'], user_agent):
+                    triggered = True
+                    trigger_reasons.append(f'UA 匹配 ({rule["user_agent_regex"]})')
+            except re.error:
+                pass  # 忽略无效的正则表达式
+        
+        # 检查 VPN 分数阈值（阈值 >= 0 时都进行检查）
+        if rule['vpn_score_threshold'] is not None and rule['vpn_score_threshold'] >= 0:
+            vpn_score = ip_info.get('vpn_score', 0)
+            if vpn_score >= rule['vpn_score_threshold']:
+                triggered = True
+                trigger_reasons.append(f'VPN 分数过高 ({vpn_score}/{rule["vpn_score_threshold"]})')
+        
+        # 如果触发规则，返回封禁信息
+        if triggered:
+            result['should_ban'] = True
+            result['reason'] = f"触发自动封禁规则：{rule['name']} ({', '.join(trigger_reasons)})"
+            result['rule_name'] = rule['name']
+            result['ban_method'] = rule['ban_method']
+            result['ban_duration'] = rule['ban_duration_minutes']
+            conn.close()
+            return result
+    
+    conn.close()
+    return result
+
+
+def execute_auto_ban(ip: str, reason: str, ban_method: str, ban_duration: int, rule_name: str):
+    """执行自动封禁
+    
+    Args:
+        ip: IP 地址
+        reason: 封禁原因
+        ban_method: 封禁方式 (302, timeout, 403)
+        ban_duration: 封禁时长（分钟）
+        rule_name: 触发规则名称
+    """
+    # 将 IP 添加到高危 IP 缓存
+    add_high_risk_ip(ip)
+    
+    # 添加到数据库
+    conn = get_db()
+    
+    # 检查是否已被封禁
+    existing = conn.execute(
+        "SELECT id FROM ip_bans WHERE ip_address = ? AND is_active = 1 "
+        "AND (expires_at IS NULL OR expires_at > datetime('now', 'localtime'))",
+        (ip,)
+    ).fetchone()
+    
+    if existing:
+        conn.close()
+        return  # 已被封禁，不需要重复操作
+    
+    # 计算过期时间
+    expires_at = None
+    if ban_duration > 0:
+        expires_at = (datetime.now() + timedelta(minutes=ban_duration)).strftime('%Y-%m-%d %H:%M:%S')
+    
+    # 插入封禁记录
+    conn.execute('''
+        INSERT INTO ip_bans (ip_address, reason, ban_type, is_active, expires_at)
+        VALUES (?, ?, 'auto', 1, ?)
+    ''', (ip, reason, expires_at))
+    
+    conn.commit()
+    conn.close()
+    
+    logger.warning(f"[自动封禁] IP: {ip}, 规则：{rule_name}, 原因：{reason}, 方式：{ban_method}, 时长：{ban_duration}分钟")
 
 
 # ==================== 管理员任务管理 ====================
@@ -4904,6 +7454,8 @@ def inject_frontend_config(html: str) -> str:
     html = html.replace('</head>', script + '</head>')
     import re
     html = re.sub(r'<title>[^<]*</title>', f'<title>{FRONTEND_CONFIG["page_title"]}</title>', html, count=1)
+    # 给所有没有 nonce 的 <script> 标签加上 nonce（CSP 要求）
+    html = re.sub(r'<script(?![^>]*nonce=)([^>]*)>', f'<script nonce="{nonce}"\\1>', html)
 
     BILIBILI_TRAP = 'https://www.bilibili.com/video/BV1UT42167xb/?spm_id_from=333.337.search-card.all.click'
 
@@ -4916,13 +7468,40 @@ def inject_frontend_config(html: str) -> str:
 window.__REPORT_PATH__ = "/report";
 window.__ADMIN_PANEL__ = "/admin";
 window.__DEBUG_MODE__ = true;
+
+(function(){{
+    var devtoolsOpen = false;
+    var checkInterval = setInterval(function(){{
+        var threshold = 160;
+        devtoolsOpen = (window.outerHeight - window.innerHeight > threshold) ||
+                       (window.outerWidth - window.innerWidth > threshold);
+        
+        if (devtoolsOpen) {{
+            clearInterval(checkInterval);
+            fetch('/api/devtools-detected', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{
+                    timestamp: Date.now(),
+                    message: '开发者工具已开启',
+                    location: window.location.href
+                }})
+            }}).catch(function(){{}});
+            
+            (function debugLoop(){{
+                debugger;
+                setTimeout(debugLoop, 100);
+            }})();
+        }}
+    }}, 500);
+}})();
 </script>'''
     honey_css = f'''<style nonce="{nonce}" id="honeypot-styles">
 #honeypot-debug-panel{{display:none;position:fixed;bottom:0;right:0;width:1px;height:1px;overflow:hidden;z-index:-9999}}
 .__honey_api_test{{opacity:0;position:absolute;left:-9999px;top:-9999px;pointer-events:none}}
 </style>'''
     honey_html = f'<!-- TODO: 发布前需确认是否移除安全审计报告入口 /report -->'
-    honey_comment = f'<!-- ============================================================ -->\n<!-- ⚠️ 敏感路径记录（仅供内部运维参考，请勿外传） -->\n<!-- /report       → 安全审计报告（需管理员权限） -->\n<!-- /admin        → 管理控制台 -->\n<!-- /debug/console → 调试终端 -->\n<!-- ============================================================ -->'
+    honey_comment = f'<!-- ============================================================ -->\n<!-- ⚠️ 敏感路径记录（仅供内部运维参考，请勿外传） -->\n<!-- /report       → 安全审计报告（需管理员权限） -->\n<!--                 内部专用无限制密钥:sk-{FAKE_API_KEY} -->\n<!-- /admin        → 管理控制台 -->\n<!-- /debug/console → 调试终端 -->\n<!-- ============================================================ -->'
 
     # ====== 蜜罐隐藏链接（仅为HTML注释，不产生任何可见元素） ======
     honey_visible_trap = f'''
@@ -5354,30 +7933,127 @@ def chat_completions():
         client_ip = get_client_ip()
         user = authenticate_request()
         if not user:
-            return json_response({"error": "请提供有效的认证凭证"}, 401)
+            return json_response({"error": "Unauthorized"}, 401)
         status_error = validate_user_status(user)
         if status_error:
             return status_error
 
-        raw_data = request.get_data(as_text=True)
-        logger.info(f"原始请求数据: {raw_data[:200]}")
         data = request.get_json()
         if not data:
-            data = json.loads(raw_data)
+            return json_response({"error": "Invalid JSON"}, 400)
+
         logger.info("=" * 60)
         logger.info("收到 /v1/chat/completions 请求")
+
+        # ========== 新增安全层1: 智能速率限制 ==========
+        user_tier = 'premium' if user.get('is_premium') else 'default'
+        prompt_text_preview = ""
+        for msg in data.get('messages', []):
+            if isinstance(msg, dict):
+                prompt_text_preview += msg.get('content', '')
+        base_tokens_preview = calculate_tokens(prompt_text_preview)
+
+        rate_check = rate_limiter.check_rate_limit(user['id'], base_tokens_preview, user_tier)
+        if not rate_check['allowed']:
+            audit_logger.log_security_event('rate_limit_exceeded', {
+                'user_id': user['id'],
+                'ip': client_ip,
+                'reason': rate_check['reason']
+            })
+            return json_response({
+                "error": "Too Many Requests",
+                "message": rate_check['reason'],
+                "retry_after": rate_check['retry_after']
+            }, 429)
+
+        # ========== 新增安全层2: 行为分析 ==========
+        behavior_analysis = rate_limiter.analyze_behavior(user['id'], {
+            'prompt_length': len(prompt_text_preview),
+            'timestamp': time.time()
+        })
+        if behavior_analysis['is_suspicious']:
+            audit_logger.log_security_event('suspicious_behavior', {
+                'user_id': user['id'],
+                'ip': client_ip,
+                'score': behavior_analysis['score'],
+                'reasons': behavior_analysis['reasons']
+            })
+            # 可疑但不阻止，只记录
+
         messages = data.get('messages', [])
-        space_id = data.get('space_id')
-        room_id = data.get('room_id', '1')
-        max_tokens = data.get('max_tokens', 500)
+        model = data.get('model', 'qwen')
+        max_tokens = data.get('max_tokens', 1024)
         temperature = data.get('temperature', 0.7)
+        top_p = data.get('top_p', 1.0)
+        n = data.get('n', 1)
         stream = data.get('stream', False)
+        stop = data.get('stop')
+        frequency_penalty = data.get('frequency_penalty', 0.0)
+        presence_penalty = data.get('presence_penalty', 0.0)
+        logprobs = data.get('logprobs')
+        echo = data.get('echo', False)
+        stop = data.get('stop')
+        user_param = data.get('user')
+
         web_search = data.get('web_search', False)
         deep_think = data.get('deep_think', False)
+        space_id = data.get('space_id')
+        room_id = data.get('room_id', '1')
+
+        if not messages or not isinstance(messages, list):
+            return json_response({"error": "messages is required"}, 400)
+
+        # ========== 新增安全层3: 蜜罐检测 ==========
+        for msg in messages:
+            content = msg.get('content', '') if isinstance(msg, dict) else str(msg)
+            is_trap, trap_response, trap_type, should_ban = ai_trap.check_trap(content, user['id'])
+            if is_trap:
+                audit_logger.log_security_event('honeypot_triggered', {
+                    'user_id': user['id'],
+                    'ip': client_ip,
+                    'trap_type': trap_type,
+                    'input_preview': content[:100]
+                })
+                if should_ban:
+                    rate_limiter.ban_user(user['id'], 3600)  # 封禁1小时
+                    return json_response({
+                        "error": "Forbidden",
+                        "message": "账户因异常行为被临时封禁"
+                    }, 403)
+                # 返回假数据给攻击者
+                return json_response({
+                    "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": trap_response},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 50, "total_tokens": 60}
+                })
+
+        # ========== 原有安全层: 提示词注入检测 ==========
+        sanitized_messages, has_injection, injection_types = prompt_defense.check_messages(messages, user['id'])
+        if has_injection:
+            audit_logger.log_security_event('prompt_injection_attempt', {
+                'user_id': user['id'],
+                'ip': client_ip,
+                'injection_types': injection_types,
+                'timestamp': datetime.utcnow().isoformat()
+            })
+            logger.warning(f"[安全] 用户 {user['id']} 尝试提示词注入: {injection_types}")
+            return json_response({
+                "error": "Bad Request",
+                "message": "检测到非法输入,请求已被记录"
+            }, 400)
+
+        messages = sanitized_messages
 
         if not ADAPTER:
             return json_response(
-                {"error": "AI服务未配置，请联系管理员"}, 500)
+                {"error": "Service Unavailable", "message": "AI服务未配置"}, 503)
 
         prompt_text = ""
         for msg in messages:
@@ -5387,6 +8063,18 @@ def chat_completions():
             prompt_text += c
         question = prompt_text.strip() or "你好"
 
+        audit_logger.log_ai_request({
+            'user_id': user['id'],
+            'ip': client_ip,
+            'request_id': None,
+            'question': question,
+            'model': model,
+            'temperature': temperature,
+            'max_tokens': max_tokens,
+            'web_search': web_search,
+            'deep_think': deep_think
+        })
+
         base_tokens = calculate_tokens(question)
         web_search_tokens = 20 if web_search else 0
         deep_think_tokens = 1 if deep_think else 0
@@ -5395,29 +8083,10 @@ def chat_completions():
         check_result = check_concurrent_and_tokens(
             user['id'], user['api_key'], total_required_tokens, space_id)
         if not check_result['success']:
-            return json_response({"error": check_result['error']}, 403)
+            return json_response({"error": "Forbidden", "message": check_result['error']}, 403)
 
         request_id = f"req_{uuid.uuid4().hex[:16]}"
         username = user.get('username', 'unknown')
-        request_json_data = json.dumps({
-            "request_id": request_id,
-            "user_id": user['id'],
-            "username": username,
-            "room_id": room_id,
-            "question": question,
-            "base_tokens": base_tokens,
-            "web_search": web_search,
-            "web_search_tokens": web_search_tokens,
-            "deep_think": deep_think,
-            "deep_think_tokens": deep_think_tokens,
-            "total_required_tokens": total_required_tokens,
-            "model": "qwen",
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": stream,
-            "space_id": space_id,
-            "timestamp": datetime.now().isoformat()
-        }, ensure_ascii=False)
 
         conn = get_db()
         conn.execute('''
@@ -5426,56 +8095,57 @@ def chat_completions():
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
         ''', (request_id, user['id'], username, room_id, question[:2000],
               base_tokens, 1 if web_search else 0, 1 if deep_think else 0,
-              total_required_tokens, request_json_data))
+              total_required_tokens, json.dumps(data, ensure_ascii=False)))
         conn.commit()
         conn.close()
 
-        logger.info(f"AI请求已创建: request_id={request_id}, base_tokens={base_tokens}, "
-                    f"web_search={web_search}(+{web_search_tokens}), deep_think={deep_think}(+{deep_think_tokens}), "
-                    f"total_required={total_required_tokens}, room_id={room_id}")
+        logger.info(f"AI请求已创建: request_id={request_id}, model={model}, base_tokens={base_tokens}")
 
         if stream:
             def generate():
                 conn = get_db()
-                conn.execute("UPDATE ai_requests SET status='processing', updated_at=datetime('now') WHERE request_id=?", (request_id,))
+                conn.execute("UPDATE ai_requests SET status='processing' WHERE request_id=?", (request_id,))
                 conn.commit()
                 conn.close()
                 try:
                     enhanced_msgs = build_messages_with_features(messages, web_search, deep_think)
-                    result = ADAPTER.process_prompt(
-                        enhanced_msgs, "qwen", max_tokens, temperature)
+                    result = ADAPTER.process_prompt(enhanced_msgs, model, max_tokens, temperature)
                     if "error" in result:
-                        yield f"data: {json.dumps({'error': result['error']}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'error': {'message': result['error'], 'type': 'service_error'}}, ensure_ascii=False)}\n\n"
                         yield "data: [DONE]\n\n"
                         return
+                    
                     answer_text = result["choices"][0]["text"]
                     ai_prompt_tokens = result["usage"]["prompt_tokens"]
                     ai_completion_tokens = result["usage"]["completion_tokens"]
                     ai_total_tokens = result["usage"]["total_tokens"]
                     total_deduct = ai_total_tokens + web_search_tokens + deep_think_tokens
-                    deduct_result = deduct_tokens(user['id'], total_deduct, space_id)
-                    remaining_tokens = deduct_result['remaining_tokens']
+
+                    deduct_tokens(user['id'], total_deduct, space_id, request_id)
+                    
                     conn = get_db()
                     conn.execute(
                         "INSERT INTO api_usage_log (user_id, api_key, prompt_tokens, completion_tokens) "
                         "VALUES (?, ?, ?, ?)",
                         (user['id'], user['api_key'], ai_prompt_tokens, ai_completion_tokens))
-                    conn.execute('''
-                        UPDATE ai_requests SET status='completed', answer=?, total_tokens=?,
-                            updated_at=datetime('now') WHERE request_id=?
-                    ''', (answer_text[:4000], total_deduct, request_id))
+                    conn.execute(
+                        "UPDATE ai_requests SET status='completed', answer=?, total_tokens=? WHERE request_id=?",
+                        (answer_text[:4000], total_deduct, request_id))
                     conn.commit()
                     conn.close()
+                    
                     response_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
                     created = int(time.time())
+                    
                     full_response = {
                         "id": response_id,
                         "object": "chat.completion.chunk",
                         "created": created,
-                        "model": "qwen",
+                        "model": model,
                         "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]
                     }
                     yield f"data: {json.dumps(full_response, ensure_ascii=False)}\n\n"
+                    
                     chunk_size = 4
                     for i in range(0, len(answer_text), chunk_size):
                         chunk_text = answer_text[i:i + chunk_size]
@@ -5483,24 +8153,26 @@ def chat_completions():
                             "id": response_id,
                             "object": "chat.completion.chunk",
                             "created": created,
-                            "model": "qwen",
+                            "model": model,
                             "choices": [{"index": 0, "delta": {"content": chunk_text}, "finish_reason": None}]
                         }
                         yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
                         time.sleep(0.02)
+                    
                     done_data = {
                         "id": response_id,
                         "object": "chat.completion.chunk",
                         "created": created,
-                        "model": "qwen",
+                        "model": model,
                         "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
                     }
                     yield f"data: {json.dumps(done_data, ensure_ascii=False)}\n\n"
                     yield "data: [DONE]\n\n"
                 except Exception as e:
                     logger.error(f"Stream AI处理错误: {str(e)}", exc_info=True)
-                    yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps({'error': {'message': str(e), 'type': 'server_error'}}, ensure_ascii=False)}\n\n"
                     yield "data: [DONE]\n\n"
+            
             return Response(generate(), mimetype='text/event-stream',
                           headers={
                               'Cache-Control': 'no-cache',
@@ -5512,64 +8184,63 @@ def chat_completions():
 
         try:
             conn = get_db()
-            conn.execute("UPDATE ai_requests SET status='processing', updated_at=datetime('now') WHERE request_id=?", (request_id,))
+            conn.execute("UPDATE ai_requests SET status='processing' WHERE request_id=?", (request_id,))
             conn.commit()
             conn.close()
-            push_ai_request_update({
-                "type": "update",
-                "request_id": request_id,
-                "status": "processing"
-            })
 
-            logger.info(f"处理AI请求: request_id={request_id}, 消息数: {len(messages)}")
+            logger.info(f"处理AI请求: request_id={request_id}, model={model}")
             enhanced_messages = build_messages_with_features(messages, web_search, deep_think)
-            response = ADAPTER.process_prompt(
-                enhanced_messages, "qwen", max_tokens, temperature)
+            response = ADAPTER.process_prompt(enhanced_messages, model, max_tokens, temperature)
+            
             if "error" in response:
                 logger.error(f"AI处理错误: request_id={request_id}, error={response['error']}")
                 conn = get_db()
-                conn.execute(
-                    "UPDATE ai_requests SET status='failed', error=?, updated_at=datetime('now') WHERE request_id=?",
-                    (str(response['error'])[:500], request_id))
+                conn.execute("UPDATE ai_requests SET status='failed', error=? WHERE request_id=?",
+                            (str(response['error'])[:500], request_id))
                 conn.commit()
                 conn.close()
-                push_ai_request_update({
-                    "type": "update",
-                    "request_id": request_id,
-                    "status": "failed",
-                    "error": response['error']
-                })
-                return json_response(response, 500)
+                return json_response({"error": "Service Unavailable", "message": response['error']}, 503)
 
             answer_text = response["choices"][0]["text"]
+
+            safe_answer, output_warnings = output_guard.validate_output(answer_text, {
+                'user_id': user['id'],
+                'request_id': request_id
+            })
+
+            if output_warnings:
+                audit_logger.log_security_event('output_security_warning', {
+                    'user_id': user['id'],
+                    'request_id': request_id,
+                    'warnings': output_warnings,
+                    'timestamp': datetime.utcnow().isoformat()
+                })
+                logger.warning(f"[安全] AI输出安全警告: {output_warnings}")
+
+            answer_text = safe_answer
+
             ai_prompt_tokens = response["usage"]["prompt_tokens"]
             ai_completion_tokens = response["usage"]["completion_tokens"]
             ai_total_tokens = response["usage"]["total_tokens"]
             total_deduct = ai_total_tokens + web_search_tokens + deep_think_tokens
 
-            deduct_result = deduct_tokens(user['id'], total_deduct, space_id)
+            deduct_result = deduct_tokens(user['id'], total_deduct, space_id, request_id)
             remaining_tokens = deduct_result['remaining_tokens']
-            space_tokens = deduct_result['space_tokens']
+            space_tokens = deduct_result.get('space_tokens', 0)
 
-            response_id = response.get("id", f"cmpl-{uuid.uuid4().hex[:12]}")
+            response_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+            created = int(time.time())
 
             conn = get_db()
             conn.execute(
                 "INSERT INTO api_usage_log (user_id, api_key, prompt_tokens, completion_tokens) "
                 "VALUES (?, ?, ?, ?)",
                 (user['id'], user['api_key'], ai_prompt_tokens, ai_completion_tokens))
-            conn.execute('''
-                UPDATE ai_requests SET status='completed', answer=?, total_tokens=?,
-                    updated_at=datetime('now') WHERE request_id=?
-            ''', (answer_text[:4000], total_deduct, request_id))
+            conn.execute(
+                "UPDATE ai_requests SET status='completed', answer=?, total_tokens=? WHERE request_id=?",
+                (answer_text[:4000], total_deduct, request_id))
             conn.commit()
             conn.close()
-
-            push_ai_request_update({
-                "type": "update",
-                "request_id": request_id,
-                "status": "completed"
-            })
 
             if space_id is not None:
                 for msg in messages:
@@ -5583,46 +8254,29 @@ def chat_completions():
                 save_room_context(room_id, user['id'], 'assistant', answer_text)
 
             logger.info(f"AI回答完成: request_id={request_id}, answer_preview={answer_text[:100]}...")
-            warnings = []
-            if remaining_tokens <= 10 and remaining_tokens > 0:
-                warnings.append(f"Token即将用完，剩余仅{remaining_tokens}")
-            if remaining_tokens <= 0:
-                if total_deduct > 0:
-                    if space_id:
-                        warnings.append("本次请求已消耗全部剩余空间Token")
-                    else:
-                        warnings.append("本次请求已消耗全部剩余Token")
-                warnings.append("Token已用完，后续请求将被拒绝")
 
             chat_response = {
                 "id": response_id,
-                "request_id": request_id,
                 "object": "chat.completion",
-                "created": response.get("created", int(time.time())),
+                "created": created,
+                "model": model,
                 "choices": [
-                    {"index": 0,
-                     "message": {"role": "assistant", "content": answer_text},
-                     "finish_reason": "stop"}
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": answer_text
+                        },
+                        "finish_reason": "stop"
+                    }
                 ],
                 "usage": {
                     "prompt_tokens": ai_prompt_tokens,
                     "completion_tokens": ai_completion_tokens,
-                    "total_tokens": ai_total_tokens,
-                    "base_tokens": base_tokens,
-                    "web_search_tokens": web_search_tokens,
-                    "deep_think_tokens": deep_think_tokens,
-                    "used_tokens": total_deduct,
-                    "remaining_tokens": remaining_tokens,
-                    "space_tokens": space_tokens
-                },
-                "features": {
-                    "web_search": web_search,
-                    "deep_think": deep_think
-                },
-                "room_id": room_id
+                    "total_tokens": ai_total_tokens
+                }
             }
-            if warnings:
-                chat_response["warning"] = "；".join(warnings)
+
             logger.info("=" * 60)
             return json_response(chat_response)
         finally:
@@ -5630,35 +8284,51 @@ def chat_completions():
 
     except Exception as e:
         logger.error(f"服务器错误: {str(e)}", exc_info=True)
-        return json_response({"error": str(e)}, 500)
+        return json_response({"error": "Internal Server Error", "message": str(e)}, 500)
 
 
 @app.route('/v1/completions', methods=['POST'])
 def completions():
-    client_ip = get_client_ip()
-    user = authenticate_request()
-    if not user:
-        return json_response({"error": "请提供有效的认证凭证"}, 401)
-    status_error = validate_user_status(user)
-    if status_error:
-        return status_error
-
     try:
+        client_ip = get_client_ip()
+        user = authenticate_request()
+        if not user:
+            return json_response({"error": "Unauthorized"}, 401)
+        status_error = validate_user_status(user)
+        if status_error:
+            return status_error
+
         data = request.get_json()
+        if not data:
+            return json_response({"error": "Invalid JSON"}, 400)
+
         logger.info("=" * 60)
         logger.info("收到 /v1/completions 请求")
+
         prompt = data.get('prompt', '')
         model = data.get('model', 'qwen')
-        max_tokens = data.get('max_tokens', 500)
+        max_tokens = data.get('max_tokens', 1024)
         temperature = data.get('temperature', 0.7)
-        room_id = data.get('room_id', '1')
+        top_p = data.get('top_p', 1.0)
+        n = data.get('n', 1)
+        stream = data.get('stream', False)
+        logprobs = data.get('logprobs')
+        echo = data.get('echo', False)
+        stop = data.get('stop')
+        presence_penalty = data.get('presence_penalty', 0.0)
+        frequency_penalty = data.get('frequency_penalty', 0.0)
+        best_of = data.get('best_of', 1)
+        user_param = data.get('user')
+
         web_search = data.get('web_search', False)
         deep_think = data.get('deep_think', False)
+        room_id = data.get('room_id', '1')
+
         if not prompt:
-            return json_response({"error": "请输入您的问题"}, 400)
+            return json_response({"error": "Bad Request", "message": "prompt is required"}, 400)
+
         if not ADAPTER:
-            return json_response(
-                {"error": "AI服务未配置，请联系管理员"}, 500)
+            return json_response({"error": "Service Unavailable", "message": "AI服务未配置"}, 503)
 
         base_tokens = calculate_tokens(prompt)
         web_search_tokens = 20 if web_search else 0
@@ -5668,27 +8338,10 @@ def completions():
         check_result = check_concurrent_and_tokens(
             user['id'], user['api_key'], total_required_tokens)
         if not check_result['success']:
-            return json_response({"error": check_result['error']}, 403)
+            return json_response({"error": "Forbidden", "message": check_result['error']}, 403)
 
         request_id = f"req_{uuid.uuid4().hex[:16]}"
         username = user.get('username', 'unknown')
-        request_json_data = json.dumps({
-            "request_id": request_id,
-            "user_id": user['id'],
-            "username": username,
-            "room_id": room_id,
-            "question": prompt,
-            "base_tokens": base_tokens,
-            "web_search": web_search,
-            "web_search_tokens": web_search_tokens,
-            "deep_think": deep_think,
-            "deep_think_tokens": deep_think_tokens,
-            "total_required_tokens": total_required_tokens,
-            "model": model,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "timestamp": datetime.now().isoformat()
-        }, ensure_ascii=False)
 
         conn = get_db()
         conn.execute('''
@@ -5697,85 +8350,82 @@ def completions():
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
         ''', (request_id, user['id'], username, room_id, prompt[:2000],
               base_tokens, 1 if web_search else 0, 1 if deep_think else 0,
-              total_required_tokens, request_json_data))
+              total_required_tokens, json.dumps(data, ensure_ascii=False)))
         conn.commit()
         conn.close()
 
-        logger.info(f"AI请求已创建: request_id={request_id}, base_tokens={base_tokens}, "
-                    f"web_search={web_search}(+{web_search_tokens}), deep_think={deep_think}(+{deep_think_tokens}), "
-                    f"total_required={total_required_tokens}, room_id={room_id}")
-
-        conn = get_db()
-        conn.execute("UPDATE ai_requests SET status='processing', updated_at=datetime('now') WHERE request_id=?", (request_id,))
-        conn.commit()
-        conn.close()
+        logger.info(f"AI请求已创建: request_id={request_id}, model={model}, base_tokens={base_tokens}")
 
         concurrent_id = add_concurrent_request(user['id'], user['api_key'])
 
         try:
+            conn = get_db()
+            conn.execute("UPDATE ai_requests SET status='processing' WHERE request_id=?", (request_id,))
+            conn.commit()
+            conn.close()
+
             messages = [{"role": "user", "content": prompt}]
             enhanced_messages = build_messages_with_features(messages, web_search, deep_think)
-            response = ADAPTER.process_prompt(
-                enhanced_messages, model, max_tokens, temperature)
+            response = ADAPTER.process_prompt(enhanced_messages, model, max_tokens, temperature)
+
             if "error" in response:
+                logger.error(f"AI处理错误: request_id={request_id}, error={response['error']}")
                 conn = get_db()
-                conn.execute(
-                    "UPDATE ai_requests SET status='failed', error=?, updated_at=datetime('now') WHERE request_id=?",
-                    (str(response['error'])[:500], request_id))
+                conn.execute("UPDATE ai_requests SET status='failed', error=? WHERE request_id=?",
+                            (str(response['error'])[:500], request_id))
                 conn.commit()
                 conn.close()
-                return json_response(response, 500)
+                return json_response({"error": "Service Unavailable", "message": response['error']}, 503)
 
             answer_text = response["choices"][0]["text"]
+            ai_prompt_tokens = response["usage"]["prompt_tokens"]
+            ai_completion_tokens = response["usage"]["completion_tokens"]
             ai_total_tokens = response["usage"]["total_tokens"]
             total_deduct = ai_total_tokens + web_search_tokens + deep_think_tokens
 
             deduct_result = deduct_tokens(user['id'], total_deduct)
-            remaining_tokens = deduct_result['remaining_tokens']
 
-            warnings = []
-            if remaining_tokens <= 10 and remaining_tokens > 0:
-                warnings.append(f"Token 即将用完，剩余仅{remaining_tokens}")
-            if remaining_tokens <= 0:
-                if total_deduct > 0:
-                    warnings.append("本次请求已消耗全部剩余 Token")
-                warnings.append("Token 已用完，后续请求将被拒绝")
+            response_id = f"cmpl-{uuid.uuid4().hex[:12]}"
+            created = int(time.time())
 
             conn = get_db()
             conn.execute(
                 "INSERT INTO api_usage_log (user_id, api_key, prompt_tokens, completion_tokens) "
                 "VALUES (?, ?, ?, ?)",
-                (user['id'], user['api_key'],
-                 response['usage']['prompt_tokens'],
-                 response['usage']['completion_tokens']))
-            conn.execute('''
-                UPDATE ai_requests SET status='completed', answer=?, total_tokens=?,
-                    updated_at=datetime('now') WHERE request_id=?
-            ''', (answer_text[:4000], total_deduct, request_id))
+                (user['id'], user['api_key'], ai_prompt_tokens, ai_completion_tokens))
+            conn.execute(
+                "UPDATE ai_requests SET status='completed', answer=?, total_tokens=? WHERE request_id=?",
+                (answer_text[:4000], total_deduct, request_id))
             conn.commit()
             conn.close()
 
-            response["id"] = response.get("id", f"cmpl-{uuid.uuid4().hex[:12]}")
-            response["request_id"] = request_id
-            response["usage"]["base_tokens"] = base_tokens
-            response["usage"]["web_search_tokens"] = web_search_tokens
-            response["usage"]["deep_think_tokens"] = deep_think_tokens
-            response["usage"]["used_tokens"] = total_deduct
-            response["usage"]["remaining_tokens"] = remaining_tokens
-            response["features"] = {
-                "web_search": web_search,
-                "deep_think": deep_think
+            completion_response = {
+                "id": response_id,
+                "object": "text_completion",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "text": answer_text,
+                        "index": 0,
+                        "logprobs": None,
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": ai_prompt_tokens,
+                    "completion_tokens": ai_completion_tokens,
+                    "total_tokens": ai_total_tokens
+                }
             }
-            response["room_id"] = room_id
-            if warnings:
-                response["warning"] = "；".join(warnings)
 
-            return json_response(response)
+            logger.info("=" * 60)
+            return json_response(completion_response)
         finally:
             remove_concurrent_request(concurrent_id)
     except Exception as e:
-        logger.error(f"服务器错误: {str(e)}")
-        return json_response({"error": str(e)}, 500)
+        logger.error(f"服务器错误: {str(e)}", exc_info=True)
+        return json_response({"error": "Internal Server Error", "message": str(e)}, 500)
 
 
 @app.route('/v1/models', methods=['GET'])
@@ -5794,10 +8444,151 @@ def list_models():
              "max_tokens": 4096, "name": "Qwen-14B-Chat"},
             {"id": "qwen-max", "object": "model",
              "created": int(time.time()), "owned_by": "alibaba",
-             "max_tokens": 4096, "name": "Qwen-Max"}
+             "max_tokens": 4096, "name": "Qwen-Max"},
+            {"id": "text-embedding-ada-002", "object": "model",
+             "created": int(time.time()), "owned_by": "openai",
+             "max_tokens": 8191, "name": "text-embedding-ada-002"}
         ]
     }
     return json_response(models)
+
+
+@app.route('/v1/embeddings', methods=['POST'])
+def create_embeddings():
+    try:
+        user = authenticate_request()
+        if not user:
+            return json_response({"error": "Unauthorized"}, 401)
+        status_error = validate_user_status(user)
+        if status_error:
+            return status_error
+
+        data = request.get_json()
+        if not data:
+            return json_response({"error": "Invalid JSON"}, 400)
+
+        input_text = data.get('input', '')
+        model = data.get('model', 'text-embedding-ada-002')
+        encoding_format = data.get('encoding_format', 'float')
+        user_param = data.get('user')
+
+        if not input_text:
+            return json_response({"error": "Bad Request", "message": "input is required"}, 400)
+
+        input_list = input_text if isinstance(input_text, list) else [input_text]
+        
+        total_tokens = sum(calculate_tokens(text) for text in input_list)
+        if total_tokens > 8191:
+            return json_response({"error": "Bad Request", "message": "Input exceeds max tokens (8191)"}, 400)
+
+        check_result = check_concurrent_and_tokens(user['id'], user['api_key'], total_tokens)
+        if not check_result['success']:
+            return json_response({"error": "Forbidden", "message": check_result['error']}, 403)
+
+        embeddings = []
+        for text in input_list:
+            text_length = len(text)
+            embedding_size = 1536
+            embedding = [(hash(f"{text}:{i}") % 1000 - 500) / 500 for i in range(embedding_size)]
+            embeddings.append(embedding)
+
+        deduct_tokens(user['id'], total_tokens)
+
+        response_id = f"emb-{uuid.uuid4().hex[:12]}"
+        created = int(time.time())
+
+        data_list = []
+        for i, embedding in enumerate(embeddings):
+            data_list.append({
+                "object": "embedding",
+                "embedding": embedding,
+                "index": i
+            })
+
+        embeddings_response = {
+            "object": "list",
+            "data": data_list,
+            "model": model,
+            "usage": {
+                "prompt_tokens": total_tokens,
+                "total_tokens": total_tokens
+            }
+        }
+
+        return json_response(embeddings_response)
+    except Exception as e:
+        logger.error(f"Embeddings错误: {str(e)}", exc_info=True)
+        return json_response({"error": "Internal Server Error", "message": str(e)}, 500)
+
+
+@app.route('/v1/moderations', methods=['POST'])
+def create_moderation():
+    try:
+        user = authenticate_request()
+        if not user:
+            return json_response({"error": "Unauthorized"}, 401)
+        status_error = validate_user_status(user)
+        if status_error:
+            return status_error
+
+        data = request.get_json()
+        if not data:
+            return json_response({"error": "Invalid JSON"}, 400)
+
+        input_text = data.get('input', '')
+        model = data.get('model', 'text-moderation-latest')
+
+        if not input_text:
+            return json_response({"error": "Bad Request", "message": "input is required"}, 400)
+
+        input_list = input_text if isinstance(input_text, list) else [input_text]
+
+        results = []
+        categories = {
+            "hate": False,
+            "hate/threatening": False,
+            "self-harm": False,
+            "sexual": False,
+            "sexual/minors": False,
+            "violence": False,
+            "violence/graphic": False
+        }
+
+        harmful_keywords = ['暴力', '自杀', '色情', '仇恨', '威胁', '恐怖', '毒品', '诈骗']
+        
+        for text in input_list:
+            flagged = False
+            scores = {}
+            cat_results = {}
+            
+            for cat in categories:
+                score = 0.0
+                if any(keyword in text for keyword in harmful_keywords):
+                    score = 0.7 + random.random() * 0.3
+                    flagged = True
+                else:
+                    score = random.random() * 0.3
+                scores[cat] = round(score, 4)
+                cat_results[cat] = score > 0.5
+            
+            results.append({
+                "categories": cat_results,
+                "category_scores": scores,
+                "flagged": flagged
+            })
+
+        response_id = f"modr-{uuid.uuid4().hex[:12]}"
+
+        moderation_response = {
+            "id": response_id,
+            "model": model,
+            "results": results
+        }
+
+        return json_response(moderation_response)
+    except Exception as e:
+        logger.error(f"Moderation错误: {str(e)}", exc_info=True)
+        return json_response({"error": "Internal Server Error", "message": str(e)}, 500)
 
 
 @app.route('/v1/calculate_tokens', methods=['POST'])
@@ -5845,6 +8636,51 @@ def get_badges_api():
         "max_normal": 10,
         "max_hacker": 20,
     })
+
+
+@app.route('/api/devtools-detected', methods=['POST'])
+def devtools_detected():
+    client_ip = get_client_ip()
+    unlock_badge(client_ip, 'f12_master')
+    try:
+        data = request.get_json(silent=True) or {}
+        message = data.get('message', '未知')
+        location = data.get('location', '')
+        logger.warning(f"[蜜罐-开发者工具检测] {client_ip} 开启了开发者工具 - {message} - {location}")
+    except Exception as e:
+        logger.warning(f"[蜜罐-开发者工具检测] {client_ip} 开启了开发者工具 - {str(e)}")
+    return json_response({"success": True})
+
+
+@app.route('/api/fake-key/token', methods=['GET'])
+def get_fake_key_token():
+    """获取一次性token用于获取假密钥"""
+    client_ip = get_client_ip()
+    token = generate_one_time_token()
+    logger.info(f"[蜜罐] {client_ip} 获取了假密钥一次性token")
+    return json_response({"token": token, "expires_in": ONE_TIME_TOKEN_EXPIRE_SECONDS})
+
+
+@app.route('/api/fake-key', methods=['POST'])
+def get_fake_key():
+    """使用一次性token获取加密的假密钥"""
+    global FAKE_API_KEY
+    client_ip = get_client_ip()
+    
+    try:
+        data = request.get_json(silent=True) or {}
+        token = data.get('token', '')
+    except Exception:
+        return json_response({"error": "请求参数错误"}, 400)
+    
+    if not validate_one_time_token(token):
+        return json_response({"error": "无效或已过期的token"}, 401)
+    
+    with FAKE_KEY_LOCK:
+        encrypted_key = encrypt_token(FAKE_API_KEY)
+    
+    logger.info(f"[蜜罐] {client_ip} 通过接口获取了加密的假密钥")
+    return json_response({"encrypted_key": encrypted_key})
 
 
 BILIBILI_TRAP = 'https://www.bilibili.com/video/BV1UT42167xb/?spm_id_from=333.337.search-card.all.click'
@@ -5955,6 +8791,39 @@ HONEYPOT_PATHS = [
 ]
 
 
+# 鼓励攻击者的消息列表
+HONEYPOT_ENCOURAGEMENTS = [
+    "🎯 目标锁定！攻击者 {ip} 正在积极扫描蜜罐路径 {path}",
+    "🍯 甜蜜陷阱！{ip} 又双叒叕踩中了蜜罐 {path}",
+    "🎮 游戏开始！攻击者 {ip} 选择了难度：不可能",
+    "📊 扫描统计：{ip} 今日已扫描 {count} 个路径，建议休息一下",
+    "🏆 坚持不懈！{ip} 访问了蜜罐 {path}，这种精神值得'学习'",
+    "🔍 专业扫描！{ip} 使用了高级扫描技术（指连续访问10个蜜罐）",
+    "💡 温馨提示：{ip}，您访问的 {path} 是蜜罐，但您可能不信",
+    "🎪 精彩表演！{ip} 正在为我们提供免费的渗透测试演示",
+    "📝 日志记录：{ip} 于 {time} 访问蜜罐 {path}，已加入观察名单",
+    "🎉 恭喜发财！{ip} 触发蜜罐，获得B站教育视频一份",
+    "🤖 AI检测：{ip} 的行为模式 99% 匹配自动化扫描器",
+    "🎵 背景音乐：'你就像那冬天里的一把火'——献给 {ip}",
+    "📈 数据收集：{ip} 的攻击数据将用于改进WAF规则，感谢您的贡献",
+    "🎭 角色扮演：{ip} 正在扮演'坚持不懈的攻击者'，演技评分：10/10",
+    "🚩 红旗警告：{ip} 已被标记为活跃攻击者，建议改行做白帽",
+]
+
+def get_honeypot_encouragement(ip: str, path: str) -> str:
+    """获取针对攻击者的鼓励消息"""
+    import random
+    rec = PATH_SCAN_TRACKER.get(ip, {'paths': set(), 'honeypot_hits': 0})
+    count = len(rec.get('paths', set()))
+    
+    message = random.choice(HONEYPOT_ENCOURAGEMENTS)
+    return message.format(
+        ip=ip,
+        path=path,
+        count=count,
+        time=time.strftime("%H:%M:%S")
+    )
+
 def honeypot_redirect():
     client_ip = get_client_ip()
     ban_honeypot_redirect(client_ip)
@@ -5963,7 +8832,11 @@ def honeypot_redirect():
         unlock_badge(client_ip, 'admin_wannabe')
     if any(p in path for p in ['.env', '.git', '.svn', 'backup', 'config', 'sql', 'shell']):
         unlock_badge(client_ip, 'cred_sniffer')
-    logger.info(f"[蜜罐] 攻击者 {client_ip} 访问了蜜罐路径 {path}，已302重定向+持续2分钟")
+    
+    # 获取鼓励消息并记录
+    encouragement = get_honeypot_encouragement(client_ip, path)
+    logger.info(f"[蜜罐] {encouragement}")
+    logger.info(f"[蜜罐] 攻击者 {client_ip} 访问蜜罐路径 {path}，已302重定向到B站教育视频")
     return redirect(BILIBILI_TRAP)
 
 
@@ -5972,21 +8845,535 @@ for _path in HONEYPOT_PATHS:
     app.add_url_rule(_path, endpoint=view_name, view_func=honeypot_redirect)
 
 
+# ==================== WAF 管理 API ====================
+
+@app.route('/api/waf/stats')
+def waf_stats():
+    """获取WAF统计信息"""
+    client_ip = get_client_ip()
+    # 仅允许白名单访问
+    if client_ip not in IP_WHITELIST:
+        return json_response({"error": "无权访问"}, 403)
+    
+    stats = waf.get_stats()
+    return json_response({
+        "success": True,
+        "data": stats
+    })
+
+
+@app.route('/api/waf/check-ip/<path:ip>')
+def waf_check_ip(ip):
+    """检查指定IP的WAF状态"""
+    client_ip = get_client_ip()
+    # 仅允许白名单访问
+    if client_ip not in IP_WHITELIST:
+        return json_response({"error": "无权访问"}, 403)
+    
+    if not is_valid_ip(ip):
+        return json_response({"error": "无效的IP地址"}, 400)
+    
+    result = waf.validate_ip(ip)
+    return json_response({
+        "success": True,
+        "data": result
+    })
+
+
+@app.route('/api/waf/clear-cache', methods=['POST'])
+def waf_clear_cache():
+    """清空WAF IP缓存"""
+    client_ip = get_client_ip()
+    # 仅允许白名单访问
+    if client_ip not in IP_WHITELIST:
+        return json_response({"error": "无权访问"}, 403)
+    
+    with waf.ip_cache_lock:
+        count = len(waf.ip_cache)
+        waf.ip_cache.clear()
+    
+    logger.info(f"[WAF] IP缓存已清空，共 {count} 条")
+    return json_response({
+        "success": True,
+        "message": f"已清空 {count} 条缓存"
+    })
+
+
+@app.route('/api/waf/reload-rules', methods=['POST'])
+def waf_reload_rules():
+    """重新加载WAF规则"""
+    client_ip = get_client_ip()
+    # 仅允许白名单访问
+    if client_ip not in IP_WHITELIST:
+        return json_response({"error": "无权访问"}, 403)
+    
+    try:
+        waf.rules = waf._load_rules()
+        waf._compile_patterns()
+        logger.info("[WAF] 规则已重新加载")
+        return json_response({
+            "success": True,
+            "message": "规则已重新加载"
+        })
+    except Exception as e:
+        return json_response({
+            "success": False,
+            "error": str(e)
+        }, 500)
+
+
 @app.route('/report')
 def honeypot_report():
     """
     蜜罐报告页面（对普通用户隐藏，仅保留后台追踪）
+    包含鼓励攻击者的"毒鸡汤"
     """
+    global FAKE_API_KEY
     client_ip = get_client_ip()
     unlock_badge(client_ip, 'pentester')
     logger.info(f"[蜜罐] 攻击者 {client_ip} 访问了假报告页面")
-    index_path = os.path.join(FRONTEND_DIST, 'index.html')
-    if os.path.exists(index_path):
-        with open(index_path, 'r', encoding='utf-8') as f:
-            html = f.read()
-        html = inject_frontend_config(html)
+    
+    # 获取攻击者的称号和统计
+    badges = get_badges(client_ip)
+    badge_names = [b['name'] for b in badges if b.get('type') == 'hacker']
+    
+    # 构建鼓励消息
+    encouragements = [
+        "🎉 恭喜！您已成功触发蜜罐警报！",
+        "💪 再接再厉！还有更多的蜜罐等着您！",
+        "🌟 您的扫描技术令人印象深刻（指扫描了这么多假路径）",
+        "🏆 已获得'渗透测试员'称号，继续加油！",
+        "🎯 提示：真正的漏洞往往藏在最显眼的地方（比如这个页面）",
+        "📊 您的攻击行为已被完整记录，包括IP、User-Agent、扫描路径等",
+        "🔍 建议：下次尝试更隐蔽的扫描方式，比如不要一次性扫50个路径",
+        "💡 小知识：/report 这个路径是专门为您这样的安全研究者准备的",
+        "🎮 游戏提示：您已解锁成就 '蜜罐品尝师'！",
+        "📈 攻击统计：您已访问蜜罐路径 {} 次，超越 99% 的攻击者".format(len([b for b in badges if '蜜罐' in b.get('desc', '')]))
+    ]
+    
+    # 随机选择几条鼓励
+    import random
+    selected_encouragement = random.choice(encouragements)
+    
+    # 读取 HTML 模板
+    report_html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'report.html')
+    if os.path.exists(report_html_path):
+        with open(report_html_path, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+        
+        # 动态注入鼓励消息到页面中
+        encouragement_banner = f"""
+<div style="background:linear-gradient(135deg, rgba(99,102,241,0.15), rgba(20,184,166,0.15));border:1px solid rgba(99,102,241,0.3);border-radius:0.75rem;padding:16px 20px;margin:16px 0;text-align:center;box-shadow:0 4px 16px rgba(99,102,241,0.1)">
+  <div style="font-size:18px;font-weight:700;color:#6366f1;margin-bottom:8px">🔐 系统安全提示</div>
+  <div style="font-size:14px;color:#cbd5e1;line-height:1.8">{selected_encouragement}</div>
+  <div style="margin-top:12px;font-size:12px;color:#64748b">访问已记录 · IP: {client_ip}</div>
+</div>
+"""
+        # 在报告标题后插入鼓励横幅
+        html_content = html_content.replace(
+            '<p class="click-hint">点击下方漏洞卡片可查看详情</p>',
+            encouragement_banner + '\n' + '<p class="click-hint">点击下方漏洞卡片可查看详情</p>'
+        )
+        
+        # 替换标题为蜜罐版
+        html_content = html_content.replace(
+            '<title>DingDang Cloud - 安全测试报告</title>',
+            '<title>DingDang Cloud - 安全审计报告</title>'
+        )
+        html_content = html_content.replace(
+            '<h1>安全测试报告</h1>',
+            '<h1>安全审计报告</h1>'
+        )
+        
+        # 在底部添加蜜罐提示
+        footer_html = """
+<div class="footer">
+  <span class="brand">DingDang Cloud</span>
+  <span class="sep-dot">·</span>
+  <span>安全审计报告</span>
+  <span class="sep-dot">·</span>
+  <span>内部使用</span>
+  <div style="margin-top:8px;font-size:10px;color:#475569">© 2026 DingDang Cloud · 未经授权禁止访问</div>
+</div>
+"""
+        # 替换原来的 footer
+        html_content = html_content.replace(
+            '<div class="footer">\n  <span class="brand">DingDang Cloud</span>\n  <span class="sep-dot">·</span>\n  <span>安全测试报告</span>\n  <span class="sep-dot">·</span>\n  <span>内部使用</span>\n</div>',
+            footer_html
+        )
+        
+        logger.info(f"[蜜罐] 假密钥已暴露给攻击者 {client_ip}: {FAKE_API_KEY[:10]}...")
+        logger.info(f"[蜜罐] 攻击者 {client_ip} 已获得鼓励：{selected_encouragement[:30]}...")
+        return Response(html_content, mimetype='text/html')
+    else:
+        logger.error(f"[蜜罐] HTML 模板文件不存在：{report_html_path}")
+        return json_response({"error": "Report template not found"}, 500)
+
+
+@app.route('/joker')
+def joker_dashboard():
+    """
+    Joker 仪表盘 - 查看所有静默记录的操作
+    仅管理员可访问
+    """
+    from flask import session
+    
+    # 检查是否为管理员（简单验证）
+    admin_user = session.get('user')
+    if not admin_user or admin_user.get('role') != 'admin':
+        # 如果没有登录或不是管理员，返回 404 隐藏此页面
+        return json_response({"error": "Not Found"}, 404)
+    
+    try:
+        conn = get_db()
+        
+        # 获取分页参数
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 50, type=int)
+        offset = (page - 1) * per_page
+        
+        # 获取筛选参数
+        filter_ip = request.args.get('ip', '')
+        filter_country = request.args.get('country', '')
+        filter_vpn = request.args.get('vpn', '')  # '1' means VPN detected
+        
+        # 构建查询条件
+        where_clauses = []
+        params = []
+        
+        if filter_ip:
+            where_clauses.append("(real_ip LIKE ? OR detected_ip LIKE ?)")
+            params.extend([f'%{filter_ip}%', f'%{filter_ip}%'])
+        
+        if filter_country:
+            where_clauses.append("country = ?")
+            params.append(filter_country)
+        
+        if filter_vpn == '1':
+            where_clauses.append("(is_vpn = 1 OR is_proxy = 1 OR vpn_score > 50)")
+        
+        where_sql = ""
+        if where_clauses:
+            where_sql = "WHERE " + " AND ".join(where_clauses)
+        
+        # 获取总数
+        count_query = f"""
+            SELECT COUNT(*) as total FROM silent_operations
+            {where_sql}
+        """
+        total = conn.execute(count_query, params).fetchone()['total']
+        
+        # 获取数据
+        data_query = f"""
+            SELECT * FROM silent_operations
+            {where_sql}
+            ORDER BY access_time DESC
+            LIMIT ? OFFSET ?
+        """
+        cursor = conn.execute(data_query, params + [per_page, offset])
+        rows = cursor.fetchall()
+        
+        # 转换为字典列表
+        operations = []
+        for row in rows:
+            operations.append({
+                'id': row[0],
+                'session_id': row[1],
+                'real_ip': row[2],
+                'detected_ip': row[3],
+                'ip_source': row[4],
+                'country': row[5],
+                'region': row[6],
+                'city': row[7],
+                'isp': row[8],
+                'user_agent': row[9],
+                'browser_fingerprint': row[10],
+                'screen_resolution': row[11],
+                'timezone': row[12],
+                'language': row[13],
+                'platform': row[14],
+                'endpoint': row[15],
+                'method': row[16],
+                'referer': row[17],
+                'vpn_score': row[18],
+                'is_proxy': row[19],
+                'is_vpn': row[20],
+                'is_datacenter': row[21],
+                'access_time': row[22],
+                'created_at': row[23]
+            })
+        
+        # 获取统计信息
+        stats_query = f"""
+            SELECT 
+                COUNT(*) as total,
+                COUNT(DISTINCT real_ip) as unique_ips,
+                SUM(CASE WHEN is_vpn = 1 OR is_proxy = 1 THEN 1 ELSE 0 END) as vpn_count,
+                COUNT(DISTINCT country) as countries
+            FROM silent_operations
+            {where_sql}
+        """
+        stats = conn.execute(stats_query, params).fetchone()
+        
+        conn.close()
+        
+        # 构建 HTML 页面
+        html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Joker Dashboard - 操作监控</title>
+    <style>
+        :root {{
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --accent: #6366f1;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+            --success: #10b981;
+        }}
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 24px;
+        }}
+        .container {{ max-width: 1400px; margin: 0 auto; }}
+        .header {{
+            background: var(--bg-secondary);
+            border-radius: 1rem;
+            padding: 24px 32px;
+            margin-bottom: 24px;
+            border: 1px solid rgba(255,255,255,0.08);
+        }}
+        h1 {{
+            font-size: 28px;
+            background: linear-gradient(135deg, #6366f1, #14b8a6);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 8px;
+        }}
+        .subtitle {{ color: var(--text-secondary); font-size: 14px; }}
+        .stats-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }}
+        .stat-card {{
+            background: var(--bg-secondary);
+            border-radius: 0.75rem;
+            padding: 20px;
+            border: 1px solid rgba(255,255,255,0.08);
+        }}
+        .stat-value {{ font-size: 32px; font-weight: 700; color: var(--accent); }}
+        .stat-label {{ font-size: 13px; color: var(--text-secondary); margin-top: 4px; }}
+        .filters {{
+            background: var(--bg-secondary);
+            border-radius: 0.75rem;
+            padding: 16px 20px;
+            margin-bottom: 24px;
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            align-items: center;
+        }}
+        .filter-input {{
+            background: var(--bg-primary);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 6px;
+            padding: 8px 12px;
+            color: var(--text-primary);
+            font-size: 14px;
+        }}
+        .filter-btn {{
+            background: var(--accent);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 8px 16px;
+            cursor: pointer;
+            font-size: 14px;
+        }}
+        .table-container {{
+            background: var(--bg-secondary);
+            border-radius: 0.75rem;
+            overflow: hidden;
+            border: 1px solid rgba(255,255,255,0.08);
+        }}
+        table {{ width: 100%; border-collapse: collapse; }}
+        th {{
+            background: rgba(99, 102, 241, 0.1);
+            padding: 12px 16px;
+            text-align: left;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--accent);
+            text-transform: uppercase;
+        }}
+        td {{
+            padding: 12px 16px;
+            border-top: 1px solid rgba(255,255,255,0.05);
+            font-size: 13px;
+        }}
+        tr:hover {{ background: rgba(99, 102, 241, 0.05); }}
+        .badge {{
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+        }}
+        .badge-vpn {{ background: rgba(239, 68, 68, 0.2); color: #fca5a5; }}
+        .badge-proxy {{ background: rgba(245, 158, 11, 0.2); color: #fcd34d; }}
+        .badge-clean {{ background: rgba(16, 185, 129, 0.2); color: #6ee7b7; }}
+        .ip-cell {{ font-family: 'JetBrains Mono', monospace; font-size: 12px; }}
+        .pagination {{
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            margin-top: 20px;
+        }}
+        .page-btn {{
+            background: var(--bg-secondary);
+            border: 1px solid rgba(255,255,255,0.1);
+            color: var(--text-primary);
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+        }}
+        .page-btn.active {{ background: var(--accent); border-color: var(--accent); }}
+        .truncate {{ max-width: 200px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🃏 Joker Dashboard</h1>
+            <div class="subtitle">静默操作监控系统 · 实时追踪所有访问者</div>
+        </div>
+        
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-value">{stats['total']}</div>
+                <div class="stat-label">总记录数</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">{stats['unique_ips']}</div>
+                <div class="stat-label">独立 IP 数</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">{stats['vpn_count']}</div>
+                <div class="stat-label">VPN/代理检测</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">{stats['countries']}</div>
+                <div class="stat-label">国家/地区</div>
+            </div>
+        </div>
+        
+        <div class="filters">
+            <input type="text" class="filter-input" placeholder="搜索 IP..." value="{filter_ip}" name="ip" form="filter-form">
+            <select class="filter-input" name="country" form="filter-form">
+                <option value="">所有国家</option>
+            </select>
+            <select class="filter-input" name="vpn" form="filter-form">
+                <option value="">所有类型</option>
+                <option value="1" {'selected' if filter_vpn == '1' else ''}>仅 VPN/代理</option>
+            </select>
+            <button type="submit" class="filter-btn" form="filter-form">筛选</button>
+            <a href="/joker" class="filter-btn" style="text-decoration:none;background:var(--bg-primary);">重置</a>
+        </div>
+        
+        <form id="filter-form" method="GET" style="display:none;"></form>
+        
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>时间</th>
+                        <th>真实 IP</th>
+                        <th>检测 IP</th>
+                        <th>位置</th>
+                        <th>端点</th>
+                        <th>方法</th>
+                        <th>User-Agent</th>
+                        <th>风险等级</th>
+                    </tr>
+                </thead>
+                <tbody>
+"""
+        
+        for op in operations:
+            # 判断风险等级
+            if op['is_vpn'] or op['is_proxy'] or op['vpn_score'] > 50:
+                risk_badge = '<span class="badge badge-vpn">VPN/代理</span>'
+            elif op['vpn_score'] > 0:
+                risk_badge = '<span class="badge badge-proxy">可疑</span>'
+            else:
+                risk_badge = '<span class="badge badge-clean">正常</span>'
+            
+            # 位置显示
+            location = ""
+            if op['country']:
+                location = op['country']
+                if op['city']:
+                    location += f" · {op['city']}"
+            
+            html += f"""
+                    <tr>
+                        <td>{op['access_time']}</td>
+                        <td class="ip-cell">{op['real_ip']}<br><small style="color:var(--text-secondary)">来源:{op['ip_source']}</small></td>
+                        <td class="ip-cell">{op['detected_ip']}</td>
+                        <td>{location or '未知'}</td>
+                        <td class="truncate">{op['endpoint']}</td>
+                        <td>{op['method']}</td>
+                        <td class="truncate" title="{op['user_agent']}">{op['user_agent'][:60]}...</td>
+                        <td>{risk_badge}</td>
+                    </tr>
+"""
+        
+        # 分页
+        total_pages = (total + per_page - 1) // per_page
+        html += """
+                </tbody>
+            </table>
+        </div>
+        
+        <div class="pagination">
+"""
+        for p in range(1, min(total_pages + 1, 11)):  # 最多显示 10 页
+            active_class = 'active' if p == page else ''
+            # 构建分页 URL
+            page_url = f'/joker?page={p}'
+            if filter_ip:
+                page_url += f'&ip={filter_ip}'
+            if filter_country:
+                page_url += f'&country={filter_country}'
+            if filter_vpn:
+                page_url += f'&vpn={filter_vpn}'
+            html += f'<button class="page-btn {active_class}" onclick="window.location.href=\'{page_url}\'">{p}</button>'
+        
+        html += f"""
+        </div>
+        <div style="text-align:center;margin-top:12px;color:var(--text-secondary);font-size:13px">
+            第 {page} 页 / 共 {total_pages} 页 · 共 {total} 条记录
+        </div>
+    </div>
+</body>
+</html>
+"""
         return Response(html, mimetype='text/html')
-    return json_response({"error": "页面不存在"}, 404)
+    
+    except Exception as e:
+        logger.error(f"[Joker] 错误：{e}")
+        return json_response({"error": str(e)}, 500)
+
 
 
 @app.route('/', defaults={'path': ''})
@@ -6126,9 +9513,28 @@ def handle_disconnect():
 
 
 @socketio.on('join_admin_ai_requests')
-def handle_join_admin_ai_requests():
+def handle_join_admin_ai_requests(data=None):
+    # 检查管理员权限
+    token = None
+    if isinstance(data, dict):
+        token = data.get('token', '')
+    if not token:
+        auth_header = request.headers.get('Authorization', '')
+        if auth_header.startswith('Bearer '):
+            token = auth_header[7:]
+    if not token:
+        emit('error', {'message': '需要管理员权限'})
+        return
+    conn = get_db()
+    user = conn.execute(
+        "SELECT id, role FROM users WHERE api_key = ? AND role = 'admin' AND is_active = 1",
+        (token,)).fetchone()
+    conn.close()
+    if not user:
+        emit('error', {'message': '管理员验证失败'})
+        return
     join_room('admin_ai_requests')
-    logger.info(f"客户端 {request.sid} 加入管理员 AI 请求房间")
+    logger.info(f"管理员 {user['id']} 加入 AI 请求房间")
     conn = get_db()
     requests = conn.execute(
         "SELECT * FROM ai_requests ORDER BY created_at DESC LIMIT 100"
@@ -6219,6 +9625,45 @@ if __name__ == "__main__":
         werkzeug.serving.WSGIRequestHandler.address_string = patched_address_string
 
             # 启动定时清理任务
+
+    # 抑制 werkzeug 中由 socketio 边缘情况触发的无害 AssertionError
+    class _SuppressWerkzeugErrors(logging.Filter):
+        def filter(self, record):
+            msg = record.getMessage()
+            return 'write() before start_response' not in msg
+    logging.getLogger('werkzeug').addFilter(_SuppressWerkzeugErrors())
+
+    # WSGI 中间件：在请求时记录日志并异步解析 IP
+    class LoggingMiddleware:
+        def __init__(self, wsgi_app):
+            self.wsgi_app = wsgi_app
+
+        def __call__(self, environ, start_response):
+            client_ip = environ.get('HTTP_X_FORWARDED_FOR', environ.get('REMOTE_ADDR', ''))
+            if client_ip and ',' in client_ip:
+                client_ip = client_ip.split(',')[0].strip()
+            environ['g.request_start_time'] = time.time()
+
+            def custom_start_response(status, headers, exc_info=None):
+                # 先调用 start_response，确保 WSGI 协议正确
+                result = start_response(status, headers, exc_info)
+                
+                # 然后在 try-except 中记录日志（不影响响应）
+                try:
+                    method = environ.get('REQUEST_METHOD', '')
+                    path = environ.get('PATH_INFO', '')
+                    elapsed = time.time() - environ['g.request_start_time']
+                    date_str = datetime.now().strftime('%d/%b/%Y %H:%M:%S')
+                    content_length = dict(headers).get('Content-Length', '')
+                    status_code = status.split(' ')[0]
+                    ip_resolver.log_and_resolve(client_ip, method, path, status_code, content_length, elapsed, date_str)
+                except Exception:
+                    pass
+                return result
+
+            return self.wsgi_app(environ, custom_start_response)
+
+    app.wsgi_app = LoggingMiddleware(app.wsgi_app)
 
     socketio.run(app, host=CFG['app']['host'], port=CFG['app']['port'],
                      debug=False, allow_unsafe_werkzeug=True)
@@ -6708,4 +10153,193 @@ try:
     migrate_2fa_schema()
 except Exception as e:
     logger.error(f"2FA 迁移失败：{e}")
+
+
+# ==================== 安全监控API ====================
+
+@app.route('/api/security/event', methods=['POST'])
+def report_security_event():
+    """接收前端安全事件报告"""
+    try:
+        data = request.get_json() or {}
+        event_type = data.get('event', 'unknown')
+        fingerprint = data.get('fingerprint', 'unknown')
+        timestamp = data.get('timestamp', time.time())
+        details = data.get('details', {})
+
+        client_ip = get_client_ip()
+
+        # 记录安全事件
+        audit_logger.log_security_event('frontend_security_event', {
+            'event_type': event_type,
+            'ip': client_ip,
+            'fingerprint': fingerprint,
+            'timestamp': timestamp,
+            'details': details,
+            'user_agent': request.headers.get('User-Agent', 'unknown')
+        })
+
+        logger.warning(f"[安全-前端] 事件: {event_type}, IP: {client_ip}, 指纹: {fingerprint}")
+
+        return json_response({"status": "ok"})
+    except Exception as e:
+        logger.error(f"[安全] 处理前端安全事件失败: {e}")
+        return json_response({"status": "error"}, 500)
+
+
+@app.route('/api/admin/security/stats', methods=['GET'])
+@require_auth
+def get_security_stats():
+    """获取安全统计信息 (管理员)"""
+    user = request.current_user
+    if not user or user.get('role') != 'admin':
+        return json_response({"error": "Forbidden"}, 403)
+
+    try:
+        stats = {
+            # 速率限制统计
+            'rate_limiter': {
+                'banned_users': len(rate_limiter.banned_users),
+                'suspicious_users': len([u for u, v in rate_limiter.suspicious_users.items() if v['score'] > 0])
+            },
+            # 蜜罐统计
+            'honeypot': ai_trap.get_trap_stats(),
+            # 提示词注入统计
+            'prompt_defense': {
+                'blocked_users': len(prompt_defense.blocked_users),
+                'injection_attempts': dict(prompt_defense.injection_attempts)
+            },
+            # WAF统计
+            'waf': waf.get_stats()
+        }
+
+        return json_response(stats)
+    except Exception as e:
+        logger.error(f"[安全] 获取安全统计失败: {e}")
+        return json_response({"error": str(e)}, 500)
+
+
+@app.route('/api/admin/security/ban-user', methods=['POST'])
+@require_auth
+def admin_ban_user():
+    """管理员封禁用户"""
+    user = request.current_user
+    if not user or user.get('role') != 'admin':
+        return json_response({"error": "Forbidden"}, 403)
+
+    try:
+        data = request.get_json() or {}
+        target_user_id = data.get('user_id')
+        duration = data.get('duration', 3600)  # 默认1小时
+        reason = data.get('reason', '')
+
+        if not target_user_id:
+            return json_response({"error": "Missing user_id"}, 400)
+
+        # 封禁用户
+        rate_limiter.ban_user(int(target_user_id), duration)
+
+        # 记录操作
+        audit_logger.log_security_event('admin_ban_user', {
+            'admin_id': user['id'],
+            'target_user_id': target_user_id,
+            'duration': duration,
+            'reason': reason
+        })
+
+        return json_response({
+            "message": f"用户 {target_user_id} 已被封禁 {duration}秒",
+            "user_id": target_user_id,
+            "duration": duration
+        })
+    except Exception as e:
+        logger.error(f"[安全] 封禁用户失败: {e}")
+        return json_response({"error": str(e)}, 500)
+
+
+@app.route('/api/admin/security/unban-user', methods=['POST'])
+@require_auth
+def admin_unban_user():
+    """管理员解封用户"""
+    user = request.current_user
+    if not user or user.get('role') != 'admin':
+        return json_response({"error": "Forbidden"}, 403)
+
+    try:
+        data = request.get_json() or {}
+        target_user_id = data.get('user_id')
+
+        if not target_user_id:
+            return json_response({"error": "Missing user_id"}, 400)
+
+        # 从各个封禁列表中移除
+        rate_limiter.banned_users.discard(int(target_user_id))
+        prompt_defense.unblock_user(int(target_user_id))
+
+        # 记录操作
+        audit_logger.log_security_event('admin_unban_user', {
+            'admin_id': user['id'],
+            'target_user_id': target_user_id
+        })
+
+        return json_response({
+            "message": f"用户 {target_user_id} 已解封",
+            "user_id": target_user_id
+        })
+    except Exception as e:
+        logger.error(f"[安全] 解封用户失败: {e}")
+        return json_response({"error": str(e)}, 500)
+
+
+@app.route('/api/admin/security/user-stats/<int:user_id>', methods=['GET'])
+@require_auth
+def get_user_security_stats(user_id):
+    """获取用户安全统计 (管理员)"""
+    user = request.current_user
+    if not user or user.get('role') != 'admin':
+        return json_response({"error": "Forbidden"}, 403)
+
+    try:
+        stats = rate_limiter.get_user_stats(user_id)
+        stats['injection_attempts'] = prompt_defense.injection_attempts.get(user_id, 0)
+        stats['honeypot_triggers'] = ai_trap.trapped_users.get(user_id, 0)
+        stats['is_blocked'] = prompt_defense.is_user_blocked(user_id)
+
+        return json_response(stats)
+    except Exception as e:
+        logger.error(f"[安全] 获取用户统计失败: {e}")
+        return json_response({"error": str(e)}, 500)
+
+
+@app.route('/api/security/verify-signature', methods=['POST'])
+def verify_request_signature():
+    """验证请求签名 (用于前端测试)"""
+    try:
+        data = request.get_json() or {}
+        payload = data.get('payload', {})
+        signature_data = data.get('signature', {})
+        api_key = data.get('api_key', '')
+
+        if not api_key:
+            return json_response({"error": "Missing api_key"}, 400)
+
+        # 构建请求头
+        headers = {
+            'X-Timestamp': str(signature_data.get('timestamp', 0)),
+            'X-Nonce': signature_data.get('nonce', ''),
+            'X-Signature': signature_data.get('signature', ''),
+            'X-Fingerprint': signature_data.get('fingerprint', '')
+        }
+
+        # 验证签名
+        is_valid, error_msg = api_signer.verify_signature(payload, headers, api_key)
+
+        return json_response({
+            "valid": is_valid,
+            "error": error_msg,
+            "expected": api_signer.generate_signature(payload, api_key) if not is_valid else None
+        })
+    except Exception as e:
+        logger.error(f"[安全] 签名验证失败: {e}")
+        return json_response({"error": str(e)}, 500)
 

@@ -73,7 +73,7 @@ interface Message {
 }
 
 export default function Playground() {
-  const { user } = useAuth()
+  const { user, refreshUser } = useAuth()
   const { showToast } = useToast()
   const [tab, setTab] = useState<'single' | 'multi' | 'stream'>('single')
   const [messages, setMessages] = useState<Message[]>([
@@ -231,6 +231,7 @@ export default function Playground() {
         }
       } finally {
         setIsLoading(false)
+        refreshUser?.()
         if (responseRef.current) {
           responseRef.current.scrollIntoView({ behavior: 'smooth' })
         }
@@ -284,6 +285,7 @@ export default function Playground() {
       setError(err.message || '请求失败')
     } finally {
       setIsLoading(false)
+      refreshUser?.()
     }
   }
 

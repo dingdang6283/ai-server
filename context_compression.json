@@ -1,0 +1,47 @@
+{
+  "_meta": {
+    "title": "蜜罐钓鱼 · 上下文压缩",
+    "created": "2026-06-06",
+    "summary": "攻击者 183.192.139.215 在扫 /api/v2/* 蜜罐，我们在钓鱼逗他玩",
+    "tags": ["蜜罐", "钓鱼", "攻击者", "WebSocket", "CL绕过"]
+  },
+  "攻击者画像": {
+    "ip": "183.192.139.215",
+    "归属": "上海电信",
+    "工具": "自动化扫描器 + 手工测试",
+    "技术水平": "中等偏下 — 会基础SQL/XSS/CL绕过，不懂WebSocket协议细节",
+    "目标": "找 /api/v2/* 的登录口、敏感文件、未授权接口",
+    "当前状态": "还在扫，已被重定向到B站多次但仍不信"
+  },
+  "已有防线": {
+    "1Panel_WAF": "拦截了大部分SQL/XSS/路径穿越 payload",
+    "蜜罐重定向": "/api/v2/* 路径全部302到B站教育视频（'此地无银三百两'）",
+    "假密钥": "FAKE_API_KEY 触发后封禁IP 24h + 封对应账号 + 换新key",
+    "IP封禁": "ip_bans 表，封禁类型 auto → sleep 120s + 504",
+    "IP白名单": "只放行了站长IP，其他人走蜜罐",
+    "CL绕过": "他发现 CL 不一致能绕过WAF，但到了应用层还是被参数校验拦住"
+  },
+  "钓鱼方向": [
+    "方向1: chunked encoding / CL 绕过 — 让他以为快绕过了，实际到应用层就死",
+    "方向2: /api/v2/proxy?url=file:///etc/passwd — 蜜罐重定向到B站",
+    "方向3: WebSocket Socket.IO — join_admin_ai_requests 真返回数据但key脱敏",
+    "方向4: universal-password 万能密码 — 应用层参数校验，永远过不了",
+    "方向5: join_user_room 遍历user_id — 能join但没实时流量，干等"
+  ],
+  "已修复Bug": [
+    {"id": "BASE_DIR未定义", "文件": "server.py:8840", "修复": "改成 os.path.dirname(os.path.abspath(__file__))", "触发于": "/report 蜜罐页面500"},
+    {"id": "假密钥不封IP", "文件": "server.py:~3530", "修复": "require_auth 中触发假密钥时写入 ip_bans 封24h", "触发于": "用户要求"},
+    {"id": "handle_join_admin_ai_requests 缺参数", "文件": "server.py:9416", "修复": "加 data=None 默认参数", "触发于": "攻击者通过WebSocket发 {} 导致TypeError"},
+    {"id": "werkzeug write() before start_response", "文件": "server.py:~9491", "修复": "添加 logging.Filter 过滤该消息", "触发于": "socketio边缘情况报错刷屏"}
+  ],
+  "待处理/可加强点": [
+    "socketio WebSocket 房间权限 — join_admin_ai_requests 无需鉴权就能拿到AI请求记录",
+    "HONEYPOT_REDIRECT_IPS 断链超时和 ip_bans 逻辑重叠，可以整合",
+    "蜜罐路径列表 HONEYPOT_ALL_PATHS 要持续跟进新攻击手法补充"
+  ],
+  "攻击进度": {
+    "状态": "他自认为快成功了（CL绕过WAF、WebSocket已通）",
+    "实际进展": "全是死路/蜜罐，最有价值的进展是他帮我们发现了几个小bug",
+    "下一轮预期": "他会说CL绕过后参数校验过不去 / WebSocket join后没实时数据 / 问还有没有别的路子"
+  }
+}

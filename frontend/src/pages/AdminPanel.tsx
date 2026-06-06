@@ -2,9 +2,9 @@ import { useState, useEffect, useRef } from 'react'
 import { io, Socket } from 'socket.io-client'
 import { adminApi, aiApi } from '../services/api'
 import { useToast } from '../components/Toast'
-import type { AdminUser, TokenConfig, UsageStats, IPBan, IPTracking, AuditLogEntry, AdminTask } from '../types/api'
+import type { AdminUser, TokenConfig, UsageStats, IPBan, IPTracking, AuditLogEntry, AdminTask, AutoBanRule } from '../types/api'
 
-type AdminTab = 'users' | 'ip_monitor' | 'ip_bans' | 'audit_log' | 'tasks'
+type AdminTab = 'users' | 'ip_monitor' | 'ip_bans' | 'security_config' | 'audit_log' | 'tasks' | 'badges'
 
 const priorityLabels: Record<number, string> = {
   0: '最高', 1: '高', 2: '中', 3: '较低', 4: '低', 5: '最低'
@@ -12,10 +12,12 @@ const priorityLabels: Record<number, string> = {
 
 const TAB_NAMES: Record<AdminTab, string> = {
   users: '用户管理',
-  ip_monitor: 'IP监控',
-  ip_bans: 'IP封禁',
+  ip_monitor: 'IP 监控',
+  ip_bans: 'IP 封禁',
+  security_config: '安全配置',
   audit_log: '审计日志',
-  tasks: '任务管理'
+  tasks: '任务管理',
+  badges: '称号系统'
 }
 
 export default function AdminPanel() {
@@ -54,10 +56,12 @@ export default function AdminPanel() {
       </div>
 
       {activeTab === 'users' && <UserManagementTab showToast={showToast} showConfirm={showConfirm} />}
-      {activeTab === 'ip_monitor' && <IpMonitorTab showToast={showToast} />}
+      {activeTab === 'ip_monitor' && <IpMonitorTab showToast={showToast} showConfirm={showConfirm} showLoading={showLoading} closeToast={closeToast} />}
       {activeTab === 'ip_bans' && <IpBansTab showToast={showToast} showConfirm={showConfirm} />}
+      {activeTab === 'security_config' && <SecurityConfigTab showToast={showToast} />}
       {activeTab === 'audit_log' && <AuditLogTab showToast={showToast} />}
       {activeTab === 'tasks' && <TasksManagementTab showToast={showToast} />}
+      {activeTab === 'badges' && <BadgesManagementTab showToast={showToast} />}
     </div>
   )
 }
@@ -846,7 +850,7 @@ function UserManagementTab({ showToast, showConfirm }: { showToast: any; showCon
   )
 }
 
-function IpMonitorTab({ showToast }: { showToast: any }) {
+function IpMonitorTab({ showToast, showConfirm, showLoading, closeToast }: { showToast: any; showConfirm: any; showLoading: any; closeToast: any }) {
   const [tracking, setTracking] = useState<IPTracking[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
@@ -855,6 +859,16 @@ function IpMonitorTab({ showToast }: { showToast: any }) {
   const [sortBy, setSortBy] = useState('last_seen')
   const [sortOrder, setSortOrder] = useState('DESC')
   const [loading, setLoading] = useState(true)
+  
+  // 批量封禁相关状态
+  const [selectedIps, setSelectedIps] = useState<Set<string>>(new Set())
+  const [showBatchBanModal, setShowBatchBanModal] = useState(false)
+  const [batchBanForm, setBatchBanForm] = useState({
+    reason: '',
+    ban_type: 'manual' as string,
+    ban_method: '403' as '302' | 'timeout' | '403',
+    expires_in_minutes: '' as string
+  })
 
   const loadData = async () => {
     setLoading(true)
@@ -865,6 +879,8 @@ function IpMonitorTab({ showToast }: { showToast: any }) {
       })
       setTracking(res.tracking)
       setTotal(res.total)
+      // 清空已选择的 IP（如果不在当前列表中）
+      setSelectedIps(new Set())
     } catch (err: any) {
       showToast(err.message || '加载失败', 'error')
     } finally {
@@ -873,6 +889,68 @@ function IpMonitorTab({ showToast }: { showToast: any }) {
   }
 
   useEffect(() => { loadData() }, [page, sortBy, sortOrder])
+
+  // 复选框处理
+  const toggleIpSelection = (ip: string) => {
+    const newSelected = new Set(selectedIps)
+    if (newSelected.has(ip)) {
+      newSelected.delete(ip)
+    } else {
+      newSelected.add(ip)
+    }
+    setSelectedIps(newSelected)
+  }
+
+  const toggleAllIps = () => {
+    if (selectedIps.size === tracking.length) {
+      setSelectedIps(new Set())
+    } else {
+      setSelectedIps(new Set(tracking.map(t => t.ip_address)))
+    }
+  }
+
+  // 批量封禁处理
+  const handleBatchBan = async () => {
+    if (selectedIps.size === 0) {
+      showToast('请选择至少一个 IP', 'warning')
+      return
+    }
+    if (!batchBanForm.reason.trim()) {
+      showToast('请输入封禁原因', 'warning')
+      return
+    }
+
+    const loadingMsg = showLoading('正在批量封禁中...')
+    try {
+      const ipList = Array.from(selectedIps)
+      let successCount = 0
+      let failCount = 0
+
+      for (const ip of ipList) {
+        try {
+          await adminApi.addIpBan({
+            ip_address: ip,
+            reason: batchBanForm.reason.trim(),
+            ban_type: batchBanForm.ban_type,
+            expires_in_minutes: batchBanForm.expires_in_minutes ? parseInt(batchBanForm.expires_in_minutes) : undefined
+          })
+          successCount++
+        } catch (err: any) {
+          failCount++
+        }
+      }
+
+      closeToast(loadingMsg)
+      showToast(`批量封禁完成：成功 ${successCount} 个，失败 ${failCount} 个`, successCount > 0 ? 'success' : 'error')
+      setShowBatchBanModal(false)
+      setSelectedIps(new Set())
+      setBatchBanForm({ reason: '', ban_type: 'manual', ban_method: '403', expires_in_minutes: '' })
+      loadData()
+    } catch (err: any) {
+      closeToast(loadingMsg)
+      showToast(err.message || '批量封禁失败', 'error')
+    }
+  }
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault()
@@ -895,12 +973,53 @@ function IpMonitorTab({ showToast }: { showToast: any }) {
     return <div className="loading-screen"><div className="spinner" /></div>
   }
 
+  // 获取IP类型显示标签
+  const getIpTypeLabel = (type?: string) => {
+    const labels: Record<string, { text: string; color: string }> = {
+      normal: { text: '普通', color: '#22c55e' },
+      proxy: { text: '代理', color: '#f59e0b' },
+      vpn: { text: 'VPN', color: '#ef4444' },
+      datacenter: { text: '数据中心', color: '#8b5cf6' },
+      unknown: { text: '未知', color: '#6b7280' }
+    }
+    return labels[type || 'unknown'] || labels.unknown
+  }
+
+  // 获取VPN风险度颜色
+  const getVpnRiskColor = (score?: number) => {
+    if (!score || score === 0) return '#22c55e'
+    if (score < 30) return '#84cc16'
+    if (score < 50) return '#eab308'
+    if (score < 70) return '#f59e0b'
+    if (score < 90) return '#ef4444'
+    return '#dc2626'
+  }
+
+  // 获取VPN风险等级文字
+  const getVpnRiskLevel = (score?: number) => {
+    if (!score || score === 0) return '安全'
+    if (score < 30) return '低风险'
+    if (score < 50) return '中风险'
+    if (score < 70) return '较高风险'
+    if (score < 90) return '高风险'
+    return '极高风险'
+  }
+
   return (
     <div className="card">
-      <h3 style={{ marginBottom: '1rem' }}>IP请求监控</h3>
-      <p style={{ color: 'var(--gray-400)', fontSize: '0.8rem', marginBottom: '1rem' }}>
-        监控所有API请求的IP来源、请求频率和User-Agent信息
-      </p>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+        <div>
+          <h3 style={{ margin: 0 }}>IP 请求监控</h3>
+          <p style={{ color: 'var(--gray-400)', fontSize: '0.8rem', marginTop: '0.25rem' }}>
+            监控所有 API 请求的 IP 来源、IP 类型、VPN 风险度和请求频率
+          </p>
+        </div>
+        {selectedIps.size > 0 && (
+          <button className="btn btn-warning btn-sm" onClick={() => setShowBatchBanModal(true)}>
+            批量封禁 ({selectedIps.size} 个 IP)
+          </button>
+        )}
+      </div>
 
       <form onSubmit={handleSearch}
         style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
@@ -920,14 +1039,24 @@ function IpMonitorTab({ showToast }: { showToast: any }) {
         <table>
           <thead>
             <tr>
+              <th style={{ width: '40px' }}>
+                <input
+                  type="checkbox"
+                  checked={tracking.length > 0 && selectedIps.size === tracking.length}
+                  onChange={toggleAllIps}
+                  style={{ cursor: 'pointer' }}
+                />
+              </th>
               <th style={{ cursor: 'pointer' }} onClick={() => toggleSort('last_seen')}>
-                IP地址 {sortBy === 'last_seen' ? (sortOrder === 'DESC' ? '↓' : '↑') : ''}
+                IP 地址 {sortBy === 'last_seen' ? (sortOrder === 'DESC' ? '↓' : '↑') : ''}
               </th>
+              <th>IP 类型</th>
+              <th>VPN 风险度</th>
+              <th>地理位置</th>
               <th style={{ cursor: 'pointer' }} onClick={() => toggleSort('request_count')}>
-                请求总数 {sortBy === 'request_count' ? (sortOrder === 'DESC' ? '↓' : '↑') : ''}
+                请求数 {sortBy === 'request_count' ? (sortOrder === 'DESC' ? '↓' : '↑') : ''}
               </th>
-              <th>端点数量</th>
-              <th>User-Agent</th>
+              <th>端点</th>
               <th style={{ cursor: 'pointer' }} onClick={() => toggleSort('first_seen')}>
                 首次请求 {sortBy === 'first_seen' ? (sortOrder === 'DESC' ? '↓' : '↑') : ''}
               </th>
@@ -936,25 +1065,81 @@ function IpMonitorTab({ showToast }: { showToast: any }) {
           </thead>
           <tbody>
             {tracking.map((t, i) => {
-              const uaPreview = t.user_agents ? t.user_agents.slice(0, 60) : '-'
+              const ipType = getIpTypeLabel(t.ip_type)
+              const vpnColor = getVpnRiskColor(t.vpn_score)
+              const vpnLevel = getVpnRiskLevel(t.vpn_score)
+              const location = [t.country, t.region, t.city].filter(Boolean).join(' / ') || '-'
+              const isSelected = selectedIps.has(t.ip_address)
+
               return (
                 <tr key={t.ip_address + i}>
+                  <td style={{ width: '40px', textAlign: 'center' }}>
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => toggleIpSelection(t.ip_address)}
+                      style={{ cursor: 'pointer' }}
+                    />
+                  </td>
                   <td style={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>
                     {t.ip_address}
                   </td>
-                  <td style={{ fontWeight: 600 }}>
-                    <span className={'tag ' + (
-                      t.total_requests > 1000 ? 'tag-admin' :
-                      t.total_requests > 200 ? 'tag-verified' : 'tag-user'
-                    )}>
-                      {t.total_requests.toLocaleString()}
+                  <td>
+                    <span style={{
+                      display: 'inline-block',
+                      padding: '0.25rem 0.5rem',
+                      borderRadius: '0.25rem',
+                      fontSize: '0.75rem',
+                      fontWeight: 600,
+                      backgroundColor: ipType.color + '20',
+                      color: ipType.color,
+                      border: `1px solid ${ipType.color}40`
+                    }}>
+                      {ipType.text}
                     </span>
                   </td>
-                  <td>{t.endpoint_count}</td>
-                  <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', fontSize: '0.75rem' }}
-                    title={t.user_agents || ''}>
-                    {uaPreview}
+                  <td>
+                    {t.vpn_score !== undefined && t.vpn_score > 0 ? (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <div style={{
+                          width: '60px',
+                          height: '6px',
+                          backgroundColor: '#374151',
+                          borderRadius: '3px',
+                          overflow: 'hidden'
+                        }}>
+                          <div style={{
+                            width: `${Math.min(t.vpn_score, 100)}%`,
+                            height: '100%',
+                            backgroundColor: vpnColor,
+                            borderRadius: '3px'
+                          }} />
+                        </div>
+                        <span style={{
+                          fontSize: '0.75rem',
+                          color: vpnColor,
+                          fontWeight: 600,
+                          whiteSpace: 'nowrap'
+                        }}>
+                          {t.vpn_score} - {vpnLevel}
+                        </span>
+                      </div>
+                    ) : (
+                      <span style={{ fontSize: '0.75rem', color: '#22c55e' }}>安全</span>
+                    )}
                   </td>
+                  <td style={{ fontSize: '0.8rem', maxWidth: '150px', overflow: 'hidden', textOverflow: 'ellipsis' }} title={location}>
+                    {location}
+                  </td>
+                  <td style={{ fontWeight: 600 }}>
+                    <span className={'tag ' + (
+                      (t.total_requests || 0) > 1000 ? 'tag-admin' :
+                      (t.total_requests || 0) > 200 ? 'tag-verified' : 'tag-user'
+                    )}>
+                      {(t.total_requests || 0).toLocaleString()}
+                    </span>
+                  </td>
+                  <td>{t.endpoint_count || 0}</td>
                   <td style={{ fontSize: '0.8rem', whiteSpace: 'nowrap' }}>{t.first_seen}</td>
                   <td style={{ fontSize: '0.8rem', whiteSpace: 'nowrap' }}>{t.last_seen}</td>
                 </tr>
@@ -981,11 +1166,77 @@ function IpMonitorTab({ showToast }: { showToast: any }) {
                 disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}>下一页</button>
             </div>
           )}
+
+      {/* 批量封禁模态框 */}
+      {showBatchBanModal && (
+        <div className="modal-overlay" onClick={() => setShowBatchBanModal(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>批量封禁 IP</h3>
+              <button className="modal-close" onClick={() => setShowBatchBanModal(false)}>✕</button>
+            </div>
+            <div className="modal-body">
+              <p style={{ color: 'var(--gray-400)', fontSize: '0.8rem', marginBottom: '1rem' }}>
+                即将封禁 {selectedIps.size} 个 IP 地址
+              </p>
+              
+              <div className="form-group">
+                <label className="label">封禁原因</label>
+                <textarea className="input" rows={3}
+                  placeholder="请描述封禁原因"
+                  value={batchBanForm.reason}
+                  onChange={e => setBatchBanForm({ ...batchBanForm, reason: e.target.value })} />
+              </div>
+              
+              <div className="form-group">
+                <label className="label">封禁类型</label>
+                <select className="input" value={batchBanForm.ban_type}
+                  onChange={e => setBatchBanForm({ ...batchBanForm, ban_type: e.target.value })}>
+                  <option value="manual">手动封禁</option>
+                  <option value="auto">自动封禁</option>
+                </select>
+              </div>
+              
+              <div className="form-group">
+                <label className="label">封禁方式</label>
+                <select className="input" value={batchBanForm.ban_method}
+                  onChange={e => setBatchBanForm({ ...batchBanForm, ban_method: e.target.value as '302' | 'timeout' | '403' })}>
+                  <option value="403">返回 403 禁止访问</option>
+                  <option value="302">302 重定向</option>
+                  <option value="timeout">请求超时</option>
+                </select>
+              </div>
+              
+              <div className="form-group">
+                <label className="label">
+                  封禁时长（分钟）
+                  <span style={{ color: 'var(--gray-500)', fontSize: '0.7rem', marginLeft: '0.375rem' }}>
+                    (留空为永久封禁)
+                  </span>
+                </label>
+                <input className="input" type="number" min="1"
+                  placeholder="留空为永久封禁"
+                  value={batchBanForm.expires_in_minutes}
+                  onChange={e => setBatchBanForm({ ...batchBanForm, expires_in_minutes: e.target.value })} />
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-secondary"
+                onClick={() => setShowBatchBanModal(false)}>取消</button>
+              <button className="btn btn-warning"
+                onClick={handleBatchBan}>确认批量封禁</button>
+            </div>
+          </div>
+        </div>
+      )}
         </div>
       )
     }
 
 function IpBansTab({ showToast, showConfirm }: { showToast: any; showConfirm: any }) {
+  const [activeSubTab, setActiveSubTab] = useState<'bans' | 'rules'>('bans')
+  
+  // IP 封禁相关状态
   const [bans, setBans] = useState<IPBan[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
@@ -995,6 +1246,23 @@ function IpBansTab({ showToast, showConfirm }: { showToast: any; showConfirm: an
   const [banForm, setBanForm] = useState({
     ip_address: '', reason: '', ban_type: 'manual' as string,
     expires_in_minutes: '' as string
+  })
+
+  // 自动封禁规则相关状态
+  const [rules, setRules] = useState<AutoBanRule[]>([])
+  const [rulesLoading, setRulesLoading] = useState(true)
+  const [showRuleModal, setShowRuleModal] = useState(false)
+  const [editingRule, setEditingRule] = useState<AutoBanRule | null>(null)
+  const [ruleForm, setRuleForm] = useState({
+    name: '',
+    description: '',
+    trigger_honeypot: false,
+    trigger_fake_report: false,
+    user_agent_regex: '',
+    vpn_score_threshold: 70,
+    ban_method: '403' as '302' | 'timeout' | '403',
+    ban_duration_minutes: 60,
+    ban_reason: ''
   })
 
   const loadData = async (searchTerm?: string) => {
@@ -1009,11 +1277,120 @@ function IpBansTab({ showToast, showConfirm }: { showToast: any; showConfirm: an
     }
   }
 
-  useEffect(() => { loadData() }, [])
+  // 加载自动封禁规则
+  const loadRules = async () => {
+    setRulesLoading(true)
+    try {
+      const res = await adminApi.getAutoBanRules()
+      setRules(res.rules)
+    } catch (err: any) {
+      showToast(err.message || '加载规则失败', 'error')
+    } finally {
+      setRulesLoading(false)
+    }
+  }
+
+  useEffect(() => { 
+    loadData()
+    if (activeSubTab === 'rules') {
+      loadRules()
+    }
+  }, [activeSubTab])
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault()
     loadData(search)
+  }
+
+  // 添加/更新规则
+  const handleSaveRule = async () => {
+    if (!ruleForm.name.trim()) {
+      showToast('请输入规则名称', 'warning')
+      return
+    }
+    if (!ruleForm.ban_reason.trim()) {
+      showToast('请输入封禁原因', 'warning')
+      return
+    }
+
+    try {
+      const data = {
+        name: ruleForm.name.trim(),
+        description: ruleForm.description.trim() || undefined,
+        trigger_honeypot: ruleForm.trigger_honeypot,
+        trigger_fake_report: ruleForm.trigger_fake_report,
+        user_agent_regex: ruleForm.user_agent_regex || undefined,
+        vpn_score_threshold: ruleForm.vpn_score_threshold,
+        ban_method: ruleForm.ban_method,
+        ban_duration_minutes: ruleForm.ban_duration_minutes,
+        ban_reason: ruleForm.ban_reason.trim()
+      }
+
+      if (editingRule) {
+        await adminApi.updateAutoBanRule(editingRule.id, data)
+        showToast('规则已更新', 'success')
+      } else {
+        await adminApi.addAutoBanRule(data)
+        showToast('规则已添加', 'success')
+      }
+      setShowRuleModal(false)
+      setEditingRule(null)
+      setRuleForm({
+        name: '',
+        description: '',
+        trigger_honeypot: false,
+        trigger_fake_report: false,
+        user_agent_regex: '',
+        vpn_score_threshold: 70,
+        ban_method: '403',
+        ban_duration_minutes: 60,
+        ban_reason: ''
+      })
+      loadRules()
+    } catch (err: any) {
+      showToast(err.message || '操作失败', 'error')
+    }
+  }
+
+  // 打开规则编辑
+  const openRuleEdit = (rule: AutoBanRule) => {
+    setEditingRule(rule)
+    setRuleForm({
+      name: rule.name,
+      description: rule.description || '',
+      trigger_honeypot: !!rule.trigger_honeypot,
+      trigger_fake_report: !!rule.trigger_fake_report,
+      user_agent_regex: rule.user_agent_regex || '',
+      vpn_score_threshold: rule.vpn_score_threshold ?? 70,
+      ban_method: rule.ban_method ?? '403',
+      ban_duration_minutes: rule.ban_duration_minutes ?? 60,
+      ban_reason: rule.ban_reason || ''
+    })
+    setShowRuleModal(true)
+  }
+
+  // 删除规则
+  const handleDeleteRule = async (ruleId: number) => {
+    showConfirm('确定要删除此自动封禁规则吗？', async () => {
+      try {
+        await adminApi.deleteAutoBanRule(ruleId)
+        showToast('规则已删除', 'success')
+        loadRules()
+      } catch (err: any) {
+        showToast(err.message || '删除失败', 'error')
+      }
+    })
+  }
+
+  // 切换规则状态
+  const handleToggleRule = async (ruleId: number) => {
+    try {
+      await adminApi.toggleAutoBanRule(ruleId)
+      showToast('规则状态已更新', 'success')
+      loadRules()
+    } catch (err: any) {
+      showToast(err.message || '操作失败', 'error')
+    }
   }
 
   const handleAddBan = async () => {
@@ -1180,12 +1557,12 @@ function IpBansTab({ showToast, showConfirm }: { showToast: any; showConfirm: an
         <div className="modal-overlay" onClick={() => setShowAddModal(false)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
-              <h3>添加IP封禁</h3>
+              <h3>添加 IP 封禁</h3>
               <button className="modal-close" onClick={() => setShowAddModal(false)}>✕</button>
             </div>
             <div className="modal-body">
               <div className="form-group">
-                <label className="label">IP地址</label>
+                <label className="label">IP 地址</label>
                 <input className="input" type="text"
                   placeholder="如 192.168.1.1"
                   value={banForm.ip_address}
@@ -1228,6 +1605,461 @@ function IpBansTab({ showToast, showConfirm }: { showToast: any; showConfirm: an
           </div>
         </div>
       )}
+
+      {activeSubTab === 'rules' && (
+        <>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+            <div>
+              <h3 style={{ margin: 0 }}>自动封禁规则</h3>
+              <p style={{ color: 'var(--gray-400)', fontSize: '0.8rem', marginTop: '0.25rem' }}>
+                配置自动触发 IP 封禁的规则
+              </p>
+            </div>
+            <button className="btn btn-primary btn-sm"
+              onClick={() => {
+                setEditingRule(null)
+                setRuleForm({
+                  name: '',
+                  description: '',
+                  trigger_honeypot: false,
+                  trigger_fake_report: false,
+                  user_agent_regex: '',
+                  vpn_score_threshold: 70,
+                  ban_method: '403',
+                  ban_duration_minutes: 60,
+                  ban_reason: ''
+                })
+                setShowRuleModal(true)
+              }}>添加规则</button>
+          </div>
+
+          {rulesLoading ? (
+            <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--gray-400)' }}>
+              <span className="spinner" /> 加载中...
+            </div>
+          ) : rules.length === 0 ? (
+            <div className="empty-state" style={{ padding: '2rem' }}>
+              暂无自动封禁规则
+            </div>
+          ) : (
+            <div className="table-wrap">
+              <table style={{ minWidth: 900 }}>
+                <colgroup>
+                  <col style={{ width: '15%' }} />
+                  <col style={{ width: '20%' }} />
+                  <col style={{ width: '10%' }} />
+                  <col style={{ width: '15%' }} />
+                  <col style={{ width: '15%' }} />
+                  <col style={{ width: '10%' }} />
+                  <col style={{ width: '15%' }} />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th>名称</th>
+                    <th>描述</th>
+                    <th>状态</th>
+                    <th>触发条件</th>
+                    <th>封禁方式</th>
+                    <th>封禁时长</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rules.map(rule => (
+                    <tr key={rule.id}>
+                      <td style={{ fontWeight: 600 }}>{rule.name}</td>
+                      <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', fontSize: '0.85rem' }} title={rule.description || '-'}>
+                        {rule.description || '-'}
+                      </td>
+                      <td>
+                        <span className={'tag ' + (rule.is_active ? 'tag-active' : 'tag-disabled')}>
+                          {rule.is_active ? '已启用' : '已禁用'}
+                        </span>
+                      </td>
+                      <td style={{ fontSize: '0.8rem' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                          {rule.trigger_honeypot && (
+                            <span className="tag tag-warning" style={{ fontSize: '0.7rem' }}>蜜罐触发</span>
+                          )}
+                          {rule.trigger_fake_report && (
+                            <span className="tag tag-warning" style={{ fontSize: '0.7rem' }}>虚假报告</span>
+                          )}
+                          {rule.user_agent_regex && (
+                            <span className="tag tag-admin" style={{ fontSize: '0.7rem' }}>UA 匹配</span>
+                          )}
+                          {(rule.vpn_score_threshold ?? 0) > 0 && (
+                            <span className="tag" style={{ fontSize: '0.7rem', background: '#8b5cf620', color: '#8b5cf6', border: '1px solid #8b5cf640' }}>
+                              VPN≥{rule.vpn_score_threshold ?? 0}
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td>
+                        <span className="tag tag-admin" style={{ fontSize: '0.75rem' }}>
+                          {rule.ban_method === '403' ? '403 禁止' : rule.ban_method === '302' ? '302 重定向' : '请求超时'}
+                        </span>
+                      </td>
+                      <td style={{ fontSize: '0.85rem' }}>
+                        {rule.ban_duration_minutes} 分钟
+                      </td>
+                      <td style={{ whiteSpace: 'nowrap' }}>
+                        <div style={{ display: 'flex', gap: '0.25rem' }}>
+                          <button className={'btn btn-sm ' + (rule.is_active ? 'btn-warning' : 'btn-success')}
+                            style={{ fontSize: '0.65rem', padding: '0.15rem 0.3rem' }}
+                            onClick={() => handleToggleRule(rule.id)}>
+                            {rule.is_active ? '禁用' : '启用'}
+                          </button>
+                          <button className="btn btn-sm btn-primary"
+                            style={{ fontSize: '0.65rem', padding: '0.15rem 0.3rem' }}
+                            onClick={() => openRuleEdit(rule)}>
+                            编辑
+                          </button>
+                          <button className="btn btn-sm btn-danger"
+                            style={{ fontSize: '0.65rem', padding: '0.15rem 0.3rem' }}
+                            onClick={() => handleDeleteRule(rule.id)}>
+                            删除
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* 规则编辑模态框 */}
+          {showRuleModal && (
+            <div className="modal-overlay" onClick={() => setShowRuleModal(false)}>
+              <div className="modal" onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                  <h3>{editingRule ? '编辑规则' : '添加规则'}</h3>
+                  <button className="modal-close" onClick={() => setShowRuleModal(false)}>✕</button>
+                </div>
+                <div className="modal-body">
+                  <div className="form-group">
+                    <label className="label">规则名称</label>
+                    <input className="input" type="text"
+                      placeholder="如：高 VPN 风险自动封禁"
+                      value={ruleForm.name}
+                      onChange={e => setRuleForm({ ...ruleForm, name: e.target.value })} />
+                  </div>
+                  <div className="form-group">
+                    <label className="label">规则描述</label>
+                    <textarea className="input" rows={2}
+                      placeholder="描述此规则的用途（可选）"
+                      value={ruleForm.description}
+                      onChange={e => setRuleForm({ ...ruleForm, description: e.target.value })} />
+                  </div>
+                  <div className="form-group">
+                    <label className="label">触发条件</label>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                        <input type="checkbox"
+                          checked={ruleForm.trigger_honeypot}
+                          onChange={e => setRuleForm({ ...ruleForm, trigger_honeypot: e.target.checked })} />
+                        <span>触发蜜罐时</span>
+                      </label>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                        <input type="checkbox"
+                          checked={ruleForm.trigger_fake_report}
+                          onChange={e => setRuleForm({ ...ruleForm, trigger_fake_report: e.target.checked })} />
+                        <span>触发虚假报告时</span>
+                      </label>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <input type="checkbox"
+                          checked={!!ruleForm.user_agent_regex}
+                          onChange={e => setRuleForm({ 
+                            ...ruleForm, 
+                            user_agent_regex: e.target.checked ? '.*' : '' 
+                          })} />
+                        <span>User-Agent 匹配</span>
+                      </div>
+                      {ruleForm.user_agent_regex && (
+                        <input className="input" type="text"
+                          placeholder="正则表达式，如：.*bot.*"
+                          value={ruleForm.user_agent_regex}
+                          onChange={e => setRuleForm({ ...ruleForm, user_agent_regex: e.target.value })} />
+                      )}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <input type="checkbox"
+                          checked={ruleForm.vpn_score_threshold > 0}
+                          onChange={e => setRuleForm({ 
+                            ...ruleForm, 
+                            vpn_score_threshold: e.target.checked ? 70 : 0 
+                          })} />
+                        <span>VPN 风险度阈值</span>
+                      </div>
+                      {ruleForm.vpn_score_threshold > 0 && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginLeft: '1.5rem' }}>
+                          <input type="range" min="0" max="100"
+                            value={ruleForm.vpn_score_threshold}
+                            onChange={e => setRuleForm({ ...ruleForm, vpn_score_threshold: parseInt(e.target.value) })}
+                            style={{ flex: 1 }} />
+                          <span style={{ width: '40px', textAlign: 'center' }}>{ruleForm.vpn_score_threshold}</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <div className="form-group">
+                    <label className="label">封禁方式</label>
+                    <select className="input" value={ruleForm.ban_method}
+                      onChange={e => setRuleForm({ ...ruleForm, ban_method: e.target.value as '302' | 'timeout' | '403' })}>
+                      <option value="403">返回 403 禁止访问</option>
+                      <option value="302">302 重定向</option>
+                      <option value="timeout">请求超时</option>
+                    </select>
+                  </div>
+                  <div className="form-group">
+                    <label className="label">封禁时长（分钟）</label>
+                    <input className="input" type="number" min="1" max="10080"
+                      value={ruleForm.ban_duration_minutes}
+                      onChange={e => setRuleForm({ ...ruleForm, ban_duration_minutes: parseInt(e.target.value) || 60 })} />
+                  </div>
+                  <div className="form-group">
+                    <label className="label">封禁原因</label>
+                    <textarea className="input" rows={2}
+                      placeholder="说明封禁原因"
+                      value={ruleForm.ban_reason}
+                      onChange={e => setRuleForm({ ...ruleForm, ban_reason: e.target.value })} />
+                  </div>
+                </div>
+                <div className="modal-footer">
+                  <button className="btn btn-secondary"
+                    onClick={() => setShowRuleModal(false)}>取消</button>
+                  <button className="btn btn-primary"
+                    onClick={handleSaveRule}>
+                    {editingRule ? '保存修改' : '添加规则'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+function SecurityConfigTab({ showToast }: { showToast: any }) {
+  const [config, setConfig] = useState<Record<string, string>>({})
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+
+  // 本地编辑状态
+  const [vpnThreshold, setVpnThreshold] = useState('70')
+  const [proxyAutoBan, setProxyAutoBan] = useState(true)
+  const [datacenterAutoBan, setDatacenterAutoBan] = useState(false)
+  const [banDuration, setBanDuration] = useState('60')
+  const [suspiciousThreshold, setSuspiciousThreshold] = useState('100')
+
+  const loadConfig = async () => {
+    setLoading(true)
+    try {
+      const res = await adminApi.getSecurityConfig()
+      setConfig(res.config)
+      // 同步到本地状态
+      setVpnThreshold(res.config.vpn_auto_ban_threshold || '70')
+      setProxyAutoBan(res.config.proxy_auto_ban === 'true')
+      setDatacenterAutoBan(res.config.datacenter_auto_ban === 'true')
+      setBanDuration(res.config.auto_ban_duration_minutes || '60')
+      setSuspiciousThreshold(res.config.suspicious_request_threshold || '100')
+    } catch (err: any) {
+      showToast(err.message || '加载配置失败', 'error')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { loadConfig() }, [])
+
+  const handleSave = async () => {
+    setSaving(true)
+    try {
+      const data = {
+        vpn_auto_ban_threshold: vpnThreshold,
+        proxy_auto_ban: String(proxyAutoBan),
+        datacenter_auto_ban: String(datacenterAutoBan),
+        auto_ban_duration_minutes: banDuration,
+        suspicious_request_threshold: suspiciousThreshold
+      }
+      await adminApi.updateSecurityConfig(data)
+      showToast('安全配置已保存', 'success')
+      loadConfig()
+    } catch (err: any) {
+      showToast(err.message || '保存失败', 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (loading) {
+    return <div className="loading-screen"><div className="spinner" /></div>
+  }
+
+  return (
+    <div className="card">
+      <h3 style={{ marginBottom: '1rem' }}>安全配置</h3>
+      <p style={{ color: 'var(--gray-400)', fontSize: '0.8rem', marginBottom: '1.5rem' }}>
+        配置IP自动封禁阈值和安全策略
+      </p>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+        {/* VPN风险度自动封禁 */}
+        <div style={{ 
+          padding: '1rem', 
+          background: 'rgba(0,0,0,0.2)', 
+          borderRadius: '0.5rem',
+          border: '1px solid rgba(255,255,255,0.1)'
+        }}>
+          <h4 style={{ marginBottom: '1rem', color: 'var(--gray-200)' }}>
+            VPN风险度自动封禁
+          </h4>
+          <div style={{ marginBottom: '1rem' }}>
+            <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.85rem', color: 'var(--gray-400)' }}>
+              VPN评分阈值 (0-100)
+            </label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={vpnThreshold}
+                onChange={e => setVpnThreshold(e.target.value)}
+                style={{ flex: 1 }}
+              />
+              <input
+                type="number"
+                min="0"
+                max="100"
+                value={vpnThreshold}
+                onChange={e => setVpnThreshold(e.target.value)}
+                style={{ width: '80px' }}
+                className="input"
+              />
+            </div>
+            <p style={{ fontSize: '0.75rem', color: 'var(--gray-500)', marginTop: '0.5rem' }}>
+              VPN评分超过此值的IP将被自动封禁。当前设置: {vpnThreshold} 分
+            </p>
+          </div>
+        </div>
+
+        {/* IP类型自动封禁 */}
+        <div style={{ 
+          padding: '1rem', 
+          background: 'rgba(0,0,0,0.2)', 
+          borderRadius: '0.5rem',
+          border: '1px solid rgba(255,255,255,0.1)'
+        }}>
+          <h4 style={{ marginBottom: '1rem', color: 'var(--gray-200)' }}>
+            IP类型自动封禁
+          </h4>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={proxyAutoBan}
+                onChange={e => setProxyAutoBan(e.target.checked)}
+              />
+              <span>自动封禁代理IP</span>
+              <span style={{ 
+                fontSize: '0.75rem', 
+                color: proxyAutoBan ? '#ef4444' : '#6b7280',
+                marginLeft: 'auto'
+              }}>
+                {proxyAutoBan ? '已启用' : '已禁用'}
+              </span>
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={datacenterAutoBan}
+                onChange={e => setDatacenterAutoBan(e.target.checked)}
+              />
+              <span>自动封禁数据中心IP</span>
+              <span style={{ 
+                fontSize: '0.75rem', 
+                color: datacenterAutoBan ? '#ef4444' : '#6b7280',
+                marginLeft: 'auto'
+              }}>
+                {datacenterAutoBan ? '已启用' : '已禁用'}
+              </span>
+            </label>
+          </div>
+        </div>
+
+        {/* 封禁时长 */}
+        <div style={{ 
+          padding: '1rem', 
+          background: 'rgba(0,0,0,0.2)', 
+          borderRadius: '0.5rem',
+          border: '1px solid rgba(255,255,255,0.1)'
+        }}>
+          <h4 style={{ marginBottom: '1rem', color: 'var(--gray-200)' }}>
+            自动封禁时长
+          </h4>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+            <input
+              type="number"
+              min="1"
+              max="10080"
+              value={banDuration}
+              onChange={e => setBanDuration(e.target.value)}
+              className="input"
+              style={{ width: '120px' }}
+            />
+            <span style={{ color: 'var(--gray-400)' }}>分钟</span>
+          </div>
+          <p style={{ fontSize: '0.75rem', color: 'var(--gray-500)', marginTop: '0.5rem' }}>
+            自动封禁的持续时间，范围 1-10080 分钟（1分钟-7天）
+          </p>
+        </div>
+
+        {/* 可疑请求阈值 */}
+        <div style={{ 
+          padding: '1rem', 
+          background: 'rgba(0,0,0,0.2)', 
+          borderRadius: '0.5rem',
+          border: '1px solid rgba(255,255,255,0.1)'
+        }}>
+          <h4 style={{ marginBottom: '1rem', color: 'var(--gray-200)' }}>
+            可疑请求阈值
+          </h4>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+            <input
+              type="number"
+              min="10"
+              max="10000"
+              value={suspiciousThreshold}
+              onChange={e => setSuspiciousThreshold(e.target.value)}
+              className="input"
+              style={{ width: '120px' }}
+            />
+            <span style={{ color: 'var(--gray-400)' }}>请求/小时</span>
+          </div>
+          <p style={{ fontSize: '0.75rem', color: 'var(--gray-500)', marginTop: '0.5rem' }}>
+            单IP每小时请求数超过此值将被标记为可疑
+          </p>
+        </div>
+
+        {/* 保存按钮 */}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem', marginTop: '1rem' }}>
+          <button
+            className="btn btn-secondary"
+            onClick={loadConfig}
+            disabled={saving}
+          >
+            重置
+          </button>
+          <button
+            className="btn btn-primary"
+            onClick={handleSave}
+            disabled={saving}
+          >
+            {saving ? '保存中...' : '保存配置'}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -1334,6 +2166,230 @@ function AuditLogTab({ showToast }: { showToast: any }) {
             disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}>下一页</button>
         </div>
       )}
+    </div>
+  )
+}
+function BadgesManagementTab({ showToast }: { showToast: any }) {
+  const [badges, setBadges] = useState<any[]>([])
+  const [stats, setStats] = useState({
+    total: 0,
+    total_normal: 0,
+    total_hacker: 0,
+    max_normal: 10,
+    max_hacker: 20
+  })
+  const [loading, setLoading] = useState(true)
+  const [filter, setFilter] = useState<'all' | 'normal_easy' | 'normal_hard' | 'hacker'>('all')
+
+  const loadData = async () => {
+    setLoading(true)
+    try {
+      const res = await fetch('/api/badges', {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('api_key')}`
+        }
+      })
+      const data = await res.json()
+      setBadges(data.badges || [])
+      setStats({
+        total: data.total || 0,
+        total_normal: data.total_normal || 0,
+        total_hacker: data.total_hacker || 0,
+        max_normal: data.max_normal || 10,
+        max_hacker: data.max_hacker || 20
+      })
+    } catch (err: any) {
+      showToast(err.message || '加载失败', 'error')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { loadData() }, [])
+
+  const filteredBadges = filter === 'all' 
+    ? badges 
+    : badges.filter(b => b.type === filter)
+
+  const getTypeLabel = (type: string) => {
+    const labels: Record<string, string> = {
+      normal_easy: '简单普通',
+      normal_hard: '困难普通',
+      hacker: '黑客'
+    }
+    return labels[type] || type
+  }
+
+  const getBadgeStyle = (type: string) => {
+    if (type === 'normal_easy') {
+      return {
+        background: 'linear-gradient(135deg, rgba(59,130,246,0.15), rgba(37,99,235,0.15))',
+        border: '1px solid rgba(59,130,246,0.3)',
+        color: '#60a5fa'
+      }
+    }
+    if (type === 'normal_hard') {
+      return {
+        background: 'linear-gradient(135deg, rgba(168,85,247,0.15), rgba(147,51,234,0.15))',
+        border: '1px solid rgba(168,85,247,0.3)',
+        color: '#c084fc'
+      }
+    }
+    if (type === 'hacker') {
+      return {
+        background: 'linear-gradient(135deg, rgba(239,68,68,0.15), rgba(220,38,38,0.15))',
+        border: '1px solid rgba(239,68,68,0.3)',
+        color: '#f87171'
+      }
+    }
+    return {}
+  }
+
+  return (
+    <div>
+      <div style={{ marginBottom: '1.5rem' }}>
+        <h3 style={{ marginBottom: '0.5rem' }}>称号系统总览</h3>
+        <p style={{ color: 'var(--gray-400)', fontSize: '0.85rem' }}>
+          当前用户已获得 {stats.total} 个称号，普通称号 {stats.total_normal}/{stats.max_normal}，黑客称号 {stats.total_hacker}/{stats.max_hacker}
+        </p>
+      </div>
+
+      <div className="grid-4 stagger-group" style={{ marginBottom: '1.5rem' }}>
+        <div className="card stat-card stagger-item">
+          <div className="stat-label">总称号数</div>
+          <div className="stat-value" style={{ color: 'var(--primary-500)' }}>
+            {stats.total}
+          </div>
+        </div>
+        <div className="card stat-card stagger-item">
+          <div className="stat-label">简单普通称号</div>
+          <div className="stat-value" style={{ color: '#60a5fa', fontSize: '1.1rem' }}>
+            {badges.filter(b => b.type === 'normal_easy').length}
+          </div>
+        </div>
+        <div className="card stat-card stagger-item">
+          <div className="stat-label">困难普通称号</div>
+          <div className="stat-value" style={{ color: '#c084fc', fontSize: '1.1rem' }}>
+            {badges.filter(b => b.type === 'normal_hard').length}
+          </div>
+        </div>
+        <div className="card stat-card stagger-item">
+          <div className="stat-label">黑客称号</div>
+          <div className="stat-value" style={{ color: '#f87171', fontSize: '1.1rem' }}>
+            {badges.filter(b => b.type === 'hacker').length}
+          </div>
+        </div>
+      </div>
+
+      <div className="card stagger-item">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+          <h4 style={{ margin: 0 }}>称号详情</h4>
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
+            <button
+              className={`btn btn-sm ${filter === 'all' ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setFilter('all')}
+            >
+              全部
+            </button>
+            <button
+              className={`btn btn-sm ${filter === 'normal_easy' ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setFilter('normal_easy')}
+              style={{ borderColor: '#60a5fa' }}
+            >
+              简单普通
+            </button>
+            <button
+              className={`btn btn-sm ${filter === 'normal_hard' ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setFilter('normal_hard')}
+              style={{ borderColor: '#c084fc' }}
+            >
+              困难普通
+            </button>
+            <button
+              className={`btn btn-sm ${filter === 'hacker' ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setFilter('hacker')}
+              style={{ borderColor: '#f87171' }}
+            >
+              黑客
+            </button>
+          </div>
+        </div>
+
+        {loading ? (
+          <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--gray-400)' }}>
+            <span className="spinner" /> 加载中...
+          </div>
+        ) : filteredBadges.length === 0 ? (
+          <div className="empty-state" style={{ padding: '2rem' }}>
+            暂无称号
+          </div>
+        ) : (
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+            gap: '0.75rem'
+          }}>
+            {filteredBadges.map(badge => {
+              const style = getBadgeStyle(badge.type)
+              return (
+                <div
+                  key={badge.id}
+                  style={{
+                    padding: '0.75rem 1rem',
+                    borderRadius: '0.5rem',
+                    background: style.background,
+                    border: style.border,
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: '0.75rem',
+                    transition: 'all 0.2s',
+                    cursor: 'pointer'
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.transform = 'translateY(-2px)'
+                    e.currentTarget.style.boxShadow = '0 4px 12px rgba(0,0,0,0.3)'
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.transform = 'translateY(0)'
+                    e.currentTarget.style.boxShadow = 'none'
+                  }}
+                >
+                  <span style={{ fontSize: '1.75rem' }}>{badge.icon}</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ 
+                      color: style.color, 
+                      fontWeight: 600, 
+                      fontSize: '0.95rem',
+                      marginBottom: '0.25rem'
+                    }}>
+                      {badge.name}
+                    </div>
+                    <div style={{ 
+                      fontSize: '0.8rem', 
+                      color: 'rgba(255,255,255,0.7)',
+                      marginBottom: '0.375rem'
+                    }}>
+                      {badge.desc}
+                    </div>
+                    <div style={{ 
+                      fontSize: '0.7rem', 
+                      color: 'rgba(255,255,255,0.5)',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center'
+                    }}>
+                      <span>类型：{getTypeLabel(badge.type)}</span>
+                      {badge.unlocked_at && (
+                        <span>获得：{badge.unlocked_at.replace('T', ' ').slice(0, 16)}</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
